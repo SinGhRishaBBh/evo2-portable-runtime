@@ -1164,7 +1164,9 @@ def _sdpa_flash_attn_with_kvcache(q, k_cache, v_cache, k=None, v=None, cache_seq
             cache_seqlens_tensor = cache_seqlens
             
         # Create padding mask for the KV cache
-        mask = torch.arange(s_k, device=q.device).expand(b, s_k) < cache_seqlens_tensor.unsqueeze(1)
+        # The total valid tokens in the cache = cached tokens + newly appended tokens
+        valid_seqlens = cache_seqlens_tensor + (k.shape[1] if k is not None else 0)
+        mask = torch.arange(s_k, device=q.device).expand(b, s_k) < valid_seqlens.unsqueeze(1)
         attn_mask = torch.zeros((b, 1, s_q, s_k), dtype=q.dtype, device=q.device)
         attn_mask.masked_fill_(~mask.unsqueeze(1).unsqueeze(2), float('-inf'))
         is_causal = False

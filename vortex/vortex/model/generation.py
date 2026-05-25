@@ -188,6 +188,16 @@ class Generator:
                     inference_params_dict=inference_params_dict,
                 )
 
+            # --- DEBUGGING AND NUMERICAL STABILIZATION GUARD ---
+            if torch.isnan(logits).any() or torch.isinf(logits).any():
+                print(f"\n[WARNING] NaN or Inf detected in logits at generation step {i}!")
+                print(f"Logits shape: {logits.shape}")
+                print(f"NaN count: {torch.isnan(logits).sum().item()}")
+                print(f"Inf count: {torch.isinf(logits).sum().item()}")
+                # Temporarily stabilize for sampling
+                logits = torch.nan_to_num(logits)
+            # ---------------------------------------------------
+
             token_callback(i)
 
             last_logits = logits[:, -1]
