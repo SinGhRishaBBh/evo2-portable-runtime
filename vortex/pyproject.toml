@@ -1,0 +1,44 @@
+[build-system]
+requires = [
+    "setuptools",
+    "wheel",
+]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vortex"
+version = "0.0.2"
+description = "Reference implementation of operators for deep signal processing architectures"
+readme = "README.md"
+license = {file = "LICENSE"}
+authors = [{ name = "Michael Poli"}]
+requires-python = ">=3.11"
+dependencies = [
+    "torch==2.5.1",
+    "rich==13.9.2",
+    "ruff==0.1.1",
+    "numpy",
+    "pre-commit==4.0.1",
+    "einops==0.8.0",
+    "packaging",
+    "pip",
+    "build",
+    "wheel",
+    "tqdm",
+    "setuptools",
+]
+
+[tool.black]
+line-length = 119
+
+[tool.isort]
+profile = "black"
+line_length = 119
+combine_as_imports = true
+combine_star = true
+
+[tool.setuptools]
+packages = ['vortex']
+
+
+
