@@ -3,8 +3,14 @@
 from typing import Optional, Tuple, Union
 
 import torch
+import torch.nn.functional as F
 
-import flash_attn_2_cuda as flash_attn_gpu
+try:
+    import flash_attn_2_cuda as flash_attn_gpu
+    FLASH_ATTN_AVAILABLE = True
+except ImportError:
+    flash_attn_gpu = None
+    FLASH_ATTN_AVAILABLE = False
 
 
 def maybe_contiguous(x):
@@ -1019,6 +1025,155 @@ class FlashAttnVarlenFunc(torch.autograd.Function):
         )
 
 
+# ---------------------------------------------------------------------------
+# PyTorch SDPA Fallback Implementations
+# ---------------------------------------------------------------------------
+
+def _sdpa_flash_attn_func(q, k, v, dropout_p, softmax_scale, causal, window_size, return_attn_probs):
+    b, s_q, h, d = q.shape
+    _, s_k, h_k, _ = k.shape
+
+    # Transpose for SDPA: (batch, num_heads, seqlen, headdim)
+    q = q.transpose(1, 2)
+    k = k.transpose(1, 2)
+    v = v.transpose(1, 2)
+
+    # Handle MQA/GQA by expanding K and V heads
+    if h != h_k:
+        assert h % h_k == 0
+        num_groups = h // h_k
+        k = k.unsqueeze(2).expand(b, h_k, num_groups, s_k, d).reshape(b, h, s_k, d)
+        v = v.unsqueeze(2).expand(b, h_k, num_groups, s_k, d).reshape(b, h, s_k, d)
+
+    if softmax_scale is None:
+        softmax_scale = d ** -0.5
+
+    # SDPA natively uses 1/sqrt(d). We adjust q to match requested scale.
+    scale_factor = softmax_scale * (d ** 0.5)
+    if scale_factor != 1.0:
+        q = q * scale_factor
+
+    attn_mask = None
+    if window_size != (-1, -1) and not causal:
+        # Create sliding window mask if causal is False
+        left, right = window_size
+        mask = torch.ones((s_q, s_k), dtype=torch.bool, device=q.device)
+        mask = torch.triu(mask, diagonal=-left) & torch.tril(mask, diagonal=right)
+        attn_mask = torch.zeros((s_q, s_k), dtype=q.dtype, device=q.device)
+        attn_mask.masked_fill_(~mask, float('-inf'))
+        is_causal = False
+    else:
+        is_causal = causal
+
+    out = F.scaled_dot_product_attention(
+        q, k, v,
+        attn_mask=attn_mask,
+        dropout_p=dropout_p if torch.is_grad_enabled() else 0.0,
+        is_causal=is_causal
+    )
+
+    out = out.transpose(1, 2).contiguous()
+    if return_attn_probs:
+        return out, None, None
+    return out
+
+
+def _sdpa_flash_attn_qkvpacked_func(qkv, dropout_p, softmax_scale, causal, window_size, return_attn_probs):
+    q, k, v = qkv.unbind(dim=2)
+    return _sdpa_flash_attn_func(q, k, v, dropout_p, softmax_scale, causal, window_size, return_attn_probs)
+
+
+def _sdpa_flash_attn_kvpacked_func(q, kv, dropout_p, softmax_scale, causal, window_size, return_attn_probs):
+    k, v = kv.unbind(dim=2)
+    return _sdpa_flash_attn_func(q, k, v, dropout_p, softmax_scale, causal, window_size, return_attn_probs)
+
+
+def _sdpa_flash_attn_varlen_func(q, k, v, cu_seqlens_q, cu_seqlens_k, dropout_p, softmax_scale, causal, window_size, return_attn_probs):
+    batch_size = cu_seqlens_q.shape[0] - 1
+    outputs = []
+    for i in range(batch_size):
+        start_q, end_q = cu_seqlens_q[i], cu_seqlens_q[i+1]
+        start_k, end_k = cu_seqlens_k[i], cu_seqlens_k[i+1]
+        
+        q_i = q[start_q:end_q].unsqueeze(0)
+        k_i = k[start_k:end_k].unsqueeze(0)
+        v_i = v[start_k:end_k].unsqueeze(0)
+        
+        out_i = _sdpa_flash_attn_func(q_i, k_i, v_i, dropout_p, softmax_scale, causal, window_size, return_attn_probs=False)
+        outputs.append(out_i.squeeze(0))
+        
+    out = torch.cat(outputs, dim=0)
+    if return_attn_probs:
+        return out, None, None
+    return out
+
+
+def _sdpa_flash_attn_varlen_qkvpacked_func(qkv, cu_seqlens, dropout_p, softmax_scale, causal, window_size, return_attn_probs):
+    q, k, v = qkv.unbind(dim=1)
+    return _sdpa_flash_attn_varlen_func(q, k, v, cu_seqlens, cu_seqlens, dropout_p, softmax_scale, causal, window_size, return_attn_probs)
+
+
+def _sdpa_flash_attn_varlen_kvpacked_func(q, kv, cu_seqlens_q, cu_seqlens_k, dropout_p, softmax_scale, causal, window_size, return_attn_probs):
+    k, v = kv.unbind(dim=1)
+    return _sdpa_flash_attn_varlen_func(q, k, v, cu_seqlens_q, cu_seqlens_k, dropout_p, softmax_scale, causal, window_size, return_attn_probs)
+
+
+def _sdpa_flash_attn_with_kvcache(q, k_cache, v_cache, k=None, v=None, cache_seqlens=None, softmax_scale=None, causal=False, window_size=(-1,-1), block_table=None, return_softmax_lse=False):
+    if block_table is not None:
+        raise NotImplementedError("block_table (paged KV cache) is not supported without FlashAttention.")
+    
+    if k is not None and v is not None:
+        batch_size = q.shape[0]
+        seqlen_new = k.shape[1]
+        for i in range(batch_size):
+            seq_len = cache_seqlens[i] if cache_seqlens is not None else 0
+            k_cache[i, seq_len:seq_len+seqlen_new] = k[i]
+            v_cache[i, seq_len:seq_len+seqlen_new] = v[i]
+
+    # Attention with full cache
+    # SDPA natively processes padding masks. To simplify, we extract the valid tokens if possible, or use standard mask.
+    b, s_q, h, d = q.shape
+    _, s_k, h_k, _ = k_cache.shape
+
+    q_tmp = q.transpose(1, 2)
+    k_tmp = k_cache.transpose(1, 2)
+    v_tmp = v_cache.transpose(1, 2)
+
+    if h != h_k:
+        assert h % h_k == 0
+        num_groups = h // h_k
+        k_tmp = k_tmp.unsqueeze(2).expand(b, h_k, num_groups, s_k, d).reshape(b, h, s_k, d)
+        v_tmp = v_tmp.unsqueeze(2).expand(b, h_k, num_groups, s_k, d).reshape(b, h, s_k, d)
+
+    if softmax_scale is None:
+        softmax_scale = d ** -0.5
+    scale_factor = softmax_scale * (d ** 0.5)
+    if scale_factor != 1.0:
+        q_tmp = q_tmp * scale_factor
+
+    attn_mask = None
+    if cache_seqlens is not None:
+        # Create padding mask for the KV cache
+        mask = torch.arange(s_k, device=q.device).expand(b, s_k) < cache_seqlens.unsqueeze(1)
+        attn_mask = torch.zeros((b, 1, s_q, s_k), dtype=q.dtype, device=q.device)
+        attn_mask.masked_fill_(~mask.unsqueeze(1).unsqueeze(2), float('-inf'))
+        is_causal = False
+    else:
+        is_causal = causal
+
+    out = F.scaled_dot_product_attention(
+        q_tmp, k_tmp, v_tmp,
+        attn_mask=attn_mask,
+        dropout_p=0.0,
+        is_causal=is_causal
+    )
+    
+    out = out.transpose(1, 2).contiguous()
+    if return_softmax_lse:
+        return out, None
+    return out
+
+
 def local_flash_attn_qkvpacked_func(
     qkv,
     dropout_p=0.0,
@@ -1064,6 +1219,11 @@ def local_flash_attn_qkvpacked_func(
             The output of softmax (possibly with different scaling). It also encodes the dropout
             pattern (negative means that location was dropped, nonnegative means it was kept).
     """
+    if not FLASH_ATTN_AVAILABLE:
+        return _sdpa_flash_attn_qkvpacked_func(
+            qkv, dropout_p, softmax_scale, causal, window_size, return_attn_probs
+        )
+
     return FlashAttnQKVPackedFunc.apply(
         qkv,
         dropout_p,
@@ -1141,6 +1301,11 @@ def local_flash_attn_kvpacked_func(
             The output of softmax (possibly with different scaling). It also encodes the dropout
             pattern (negative means that location was dropped, nonnegative means it was kept).
     """
+    if not FLASH_ATTN_AVAILABLE:
+        return _sdpa_flash_attn_kvpacked_func(
+            q, kv, dropout_p, softmax_scale, causal, window_size, return_attn_probs
+        )
+
     return FlashAttnKVPackedFunc.apply(
         q,
         kv,
@@ -1217,6 +1382,11 @@ def local_flash_attn_func(
             The output of softmax (possibly with different scaling). It also encodes the dropout
             pattern (negative means that location was dropped, nonnegative means it was kept).
     """
+    if not FLASH_ATTN_AVAILABLE:
+        return _sdpa_flash_attn_func(
+            q, k, v, dropout_p, softmax_scale, causal, window_size, return_attn_probs
+        )
+
     return FlashAttnFunc.apply(
         q,
         k,
@@ -1283,6 +1453,11 @@ def local_flash_attn_varlen_qkvpacked_func(
             The output of softmax (possibly with different scaling). It also encodes the dropout
             pattern (negative means that location was dropped, nonnegative means it was kept).
     """
+    if not FLASH_ATTN_AVAILABLE:
+        return _sdpa_flash_attn_varlen_qkvpacked_func(
+            qkv, cu_seqlens, dropout_p, softmax_scale, causal, window_size, return_attn_probs
+        )
+
     return FlashAttnVarlenQKVPackedFunc.apply(
         qkv,
         cu_seqlens,
@@ -1372,6 +1547,11 @@ def local_flash_attn_varlen_kvpacked_func(
             The output of softmax (possibly with different scaling). It also encodes the dropout
             pattern (negative means that location was dropped, nonnegative means it was kept).
     """
+    if not FLASH_ATTN_AVAILABLE:
+        return _sdpa_flash_attn_varlen_kvpacked_func(
+            q, kv, cu_seqlens_q, cu_seqlens_k, dropout_p, softmax_scale, causal, window_size, return_attn_probs
+        )
+
     return FlashAttnVarlenKVPackedFunc.apply(
         q,
         kv,
@@ -1464,6 +1644,13 @@ def local_flash_attn_varlen_func(
             The output of softmax (possibly with different scaling). It also encodes the dropout
             pattern (negative means that location was dropped, nonnegative means it was kept).
     """
+    if not FLASH_ATTN_AVAILABLE:
+        if block_table is not None:
+            raise NotImplementedError("block_table (paged KV cache) is not supported without FlashAttention.")
+        return _sdpa_flash_attn_varlen_func(
+            q, k, v, cu_seqlens_q, cu_seqlens_k, dropout_p, softmax_scale, causal, window_size, return_attn_probs
+        )
+
     return FlashAttnVarlenFunc.apply(
         q,
         k,
@@ -1593,6 +1780,11 @@ def local_flash_attn_with_kvcache(
             logsumexp of each row of the matrix QK^T * scaling (e.g., log of the softmax
             normalization factor).
     """
+    if not FLASH_ATTN_AVAILABLE:
+        return _sdpa_flash_attn_with_kvcache(
+            q, k_cache, v_cache, k, v, cache_seqlens, softmax_scale, causal, window_size, block_table, return_softmax_lse
+        )
+
     assert k_cache.stride(-1) == 1, "k_cache must have contiguous last dimension"
     assert v_cache.stride(-1) == 1, "v_cache must have contiguous last dimension"
     q, k, v = [maybe_contiguous(x) for x in (q, k, v)]
