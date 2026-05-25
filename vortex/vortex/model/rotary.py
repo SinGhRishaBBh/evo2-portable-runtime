@@ -40,8 +40,39 @@ def apply_rotary_emb_torch(x, cos, sin, interleaved=False):
     """
     ro_dim = cos.shape[-1] * 2
     assert ro_dim <= x.shape[-1]
-    cos = repeat(cos, "... d -> ... 1 (2 d)" if not interleaved else "... d -> ... 1 (d 2)")
-    sin = repeat(sin, "... d -> ... 1 (2 d)" if not interleaved else "... d -> ... 1 (d 2)")
+    cos = repeat(cos, "... d -> ... (2 d)" if not interleaved else "... d -> ... (d 2)")
+    sin = repeat(sin, "... d -> ... (2 d)" if not interleaved else "... d -> ... (d 2)")
+
+    # Dynamic Broadcasting Alignment
+    # Triton apply_rotary is often called with x as (batch, seqlen, nheads, headdim)
+    # but some runtimes pass (batch, nheads, seqlen, headdim).
+    # We inspect x to align cos and sin correctly.
+    if x.ndim == 4:
+        # Check if seqlen is dim 1 or dim 2
+        # cos could be (seqlen, 2*d) or (batch, seqlen, 2*d)
+        seqlen_cos = cos.shape[-2]
+        if x.shape[1] == seqlen_cos:
+            # x is (batch, seqlen, nheads, headdim)
+            cos = cos.unsqueeze(-2)
+            sin = sin.unsqueeze(-2)
+        elif x.shape[2] == seqlen_cos:
+            # x is (batch, nheads, seqlen, headdim)
+            # cos needs to unsqueeze at the nheads dimension (dim -3)
+            cos = cos.unsqueeze(-3)
+            sin = sin.unsqueeze(-3)
+        else:
+            # Fallback if sizes don't perfectly match (e.g., mismatching seqlen)
+            cos = cos.unsqueeze(-2)
+            sin = sin.unsqueeze(-2)
+    elif x.ndim == 3:
+        # x is (total_tokens, nheads, headdim)
+        cos = cos.unsqueeze(-2)
+        sin = sin.unsqueeze(-2)
+    else:
+        cos = cos.unsqueeze(-2)
+        sin = sin.unsqueeze(-2)
+
+
     return torch.cat(
         [
             x[..., :ro_dim] * cos + rotate_half(x[..., :ro_dim], interleaved) * sin,
