@@ -33,19 +33,43 @@ def rotate_half(x, interleaved=False):
         return rearrange(torch.stack((-x2, x1), dim=-1), "... d two -> ... (d two)", two=2)
 
 
-def apply_rotary_emb_torch(x, cos, sin, interleaved=False):
+def apply_rotary_emb_torch(x, cos, sin, interleaved=False, seqlen_offsets=0):
     """
     x: (batch_size, seqlen, nheads, headdim)
     cos, sin: (seqlen, rotary_dim / 2) or (batch_size, seqlen, rotary_dim / 2)
     """
+    # Dynamically determine sequence length from x
+    seqlen_x = x.shape[1] if (x.ndim == 4 and x.shape[1] < x.shape[2] or x.shape[1] == cos.shape[-2]) else (x.shape[2] if x.ndim == 4 else x.shape[0])
+    
+    # In many generation passes x is (batch, seqlen, heads, dim). We ensure we capture the true seqlen.
+    if x.ndim == 4:
+        if x.shape[1] <= cos.shape[-2] and (x.shape[2] > cos.shape[-2] or x.shape[1] < x.shape[2]):
+            seqlen_x = x.shape[1]
+        else:
+            seqlen_x = x.shape[2]
+            
+    # Slice the rotary cache to the active runtime sequence window
+    if isinstance(seqlen_offsets, torch.Tensor):
+        # If seqlen_offsets is a tensor, we might need advanced gathering, but typically for 
+        # standard fallback we can assume homogeneous or single sequence. 
+        # For simplicity in PyTorch fallback, if it's a tensor we take the first element if homogeneous.
+        offset = seqlen_offsets[0].item() if seqlen_offsets.numel() > 0 else 0
+    else:
+        offset = seqlen_offsets
+
+    # Slice the cos/sin cache.
+    # Note: If cos is (batch, max_seqlen, dim), we slice dimension 1. If (max_seqlen, dim), dimension 0.
+    if cos.ndim == 3:
+        cos = cos[:, offset : offset + seqlen_x]
+        sin = sin[:, offset : offset + seqlen_x]
+    else:
+        cos = cos[offset : offset + seqlen_x]
+        sin = sin[offset : offset + seqlen_x]
+
     ro_dim = cos.shape[-1] * 2
     assert ro_dim <= x.shape[-1]
     cos = repeat(cos, "... d -> ... (2 d)" if not interleaved else "... d -> ... (d 2)")
     sin = repeat(sin, "... d -> ... (2 d)" if not interleaved else "... d -> ... (d 2)")
-
-    print("x shape:", x.shape)
-    print("cos shape before:", cos.shape)
-    print("sin shape before:", sin.shape)
 
     # Dynamic Broadcasting Alignment
     seq_len = cos.shape[-2]
@@ -144,11 +168,11 @@ def apply_rotary(
         _logged_rotary_fallback = True
 
     # PyTorch fallback: apply_rotary_emb_torch supports the core
-    # rotation math. Advanced features (seqlen_offsets, cu_seqlens,
+    # rotation math. Advanced features (cu_seqlens,
     # inplace, conjugate) are not supported in this path.
     if conjugate:
         sin = -sin
-    result = apply_rotary_emb_torch(x, cos, sin, interleaved=interleaved)
+    result = apply_rotary_emb_torch(x, cos, sin, interleaved=interleaved, seqlen_offsets=seqlen_offsets)
     if inplace:
         x.copy_(result)
         return x
