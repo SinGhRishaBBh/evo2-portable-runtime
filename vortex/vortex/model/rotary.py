@@ -16,10 +16,10 @@ from einops import rearrange, repeat
 # ---------------------------------------------------------------------------
 try:
     from vortex.ops.embedding.rotary import apply_rotary as _triton_apply_rotary
-    _HAS_TRITON_ROTARY = True
-except (ImportError, RuntimeError):
+    TRITON_ROTARY_AVAILABLE = True
+except Exception:
     _triton_apply_rotary = None
-    _HAS_TRITON_ROTARY = False
+    TRITON_ROTARY_AVAILABLE = False
 
 _rotary_log = logging.getLogger(__name__)
 
@@ -79,34 +79,39 @@ def apply_rotary(
     """
     global _logged_rotary_fallback
 
-    if _HAS_TRITON_ROTARY:
-        return _triton_apply_rotary(
-            x, cos, sin,
-            seqlen_offsets=seqlen_offsets,
-            cu_seqlens=cu_seqlens,
-            max_seqlen=max_seqlen,
-            interleaved=interleaved,
-            inplace=inplace,
-            conjugate=conjugate,
-        )
-    else:
-        if not _logged_rotary_fallback:
-            _rotary_log.warning(
-                "Triton rotary kernel unavailable — using PyTorch fallback. "
-                "This is functionally correct but slower."
+    if TRITON_ROTARY_AVAILABLE:
+        try:
+            return _triton_apply_rotary(
+                x, cos, sin,
+                seqlen_offsets=seqlen_offsets,
+                cu_seqlens=cu_seqlens,
+                max_seqlen=max_seqlen,
+                interleaved=interleaved,
+                inplace=inplace,
+                conjugate=conjugate,
             )
-            _logged_rotary_fallback = True
+        except Exception as e:
+            if not _logged_rotary_fallback:
+                import warnings
+                warnings.warn(f"Triton rotary unavailable or failed at runtime ({e}). Falling back to PyTorch rotary embeddings.")
+                _logged_rotary_fallback = True
+            pass
 
-        # PyTorch fallback: apply_rotary_emb_torch supports the core
-        # rotation math. Advanced features (seqlen_offsets, cu_seqlens,
-        # inplace, conjugate) are not supported in this path.
-        if conjugate:
-            sin = -sin
-        result = apply_rotary_emb_torch(x, cos, sin, interleaved=interleaved)
-        if inplace:
-            x.copy_(result)
-            return x
-        return result
+    if not TRITON_ROTARY_AVAILABLE and not _logged_rotary_fallback:
+        import warnings
+        warnings.warn("Triton rotary unavailable. Falling back to PyTorch rotary embeddings.")
+        _logged_rotary_fallback = True
+
+    # PyTorch fallback: apply_rotary_emb_torch supports the core
+    # rotation math. Advanced features (seqlen_offsets, cu_seqlens,
+    # inplace, conjugate) are not supported in this path.
+    if conjugate:
+        sin = -sin
+    result = apply_rotary_emb_torch(x, cos, sin, interleaved=interleaved)
+    if inplace:
+        x.copy_(result)
+        return x
+    return result
 
 
 class ApplyRotaryEmb(torch.autograd.Function):
