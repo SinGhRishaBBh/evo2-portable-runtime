@@ -1166,9 +1166,26 @@ def _sdpa_flash_attn_with_kvcache(q, k_cache, v_cache, k=None, v=None, cache_seq
         # Create padding mask for the KV cache
         # The total valid tokens in the cache = cached tokens + newly appended tokens
         valid_seqlens = cache_seqlens_tensor + (k.shape[1] if k is not None else 0)
-        mask = torch.arange(s_k, device=q.device).expand(b, s_k) < valid_seqlens.unsqueeze(1)
-        attn_mask = torch.zeros((b, 1, s_q, s_k), dtype=q.dtype, device=q.device)
-        attn_mask.masked_fill_(~mask.unsqueeze(1).unsqueeze(2), float('-inf'))
+        max_seqlen_valid = valid_seqlens.max().item()
+        
+        # SLICING: Prevent PyTorch SDPA from evaluating dot-products on uninitialized memory
+        k_tmp = k_tmp[:, :, :max_seqlen_valid, :]
+        v_tmp = v_tmp[:, :, :max_seqlen_valid, :]
+        s_k_valid = max_seqlen_valid
+
+        mask = torch.arange(s_k_valid, device=q.device).expand(b, s_k_valid) < valid_seqlens.unsqueeze(1)
+        attn_mask = torch.zeros((b, 1, s_q, s_k_valid), dtype=q.dtype, device=q.device)
+        
+        if s_q > 1 and causal:
+            # Rigorous causal masking for chunked queries decoding over a KV-cache
+            q_idx = torch.arange(s_q, device=q.device).unsqueeze(1)
+            k_idx = torch.arange(s_k_valid, device=q.device).unsqueeze(0)
+            causal_mask = k_idx < (cache_seqlens_tensor.view(b, 1, 1) + q_idx + 1)
+            valid_mask = mask.unsqueeze(1).unsqueeze(2) & causal_mask.unsqueeze(1)
+            attn_mask.masked_fill_(~valid_mask, float('-inf'))
+        else:
+            attn_mask.masked_fill_(~mask.unsqueeze(1).unsqueeze(2), float('-inf'))
+            
         is_causal = False
     else:
         is_causal = causal
