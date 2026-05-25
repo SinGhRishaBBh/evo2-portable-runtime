@@ -43,24 +43,44 @@ def apply_rotary_emb_torch(x, cos, sin, interleaved=False):
     cos = repeat(cos, "... d -> ... (2 d)" if not interleaved else "... d -> ... (d 2)")
     sin = repeat(sin, "... d -> ... (2 d)" if not interleaved else "... d -> ... (d 2)")
 
+    print("x shape:", x.shape)
+    print("cos shape before:", cos.shape)
+    print("sin shape before:", sin.shape)
+
     # Dynamic Broadcasting Alignment
     seq_len = cos.shape[-2]
     
     if x.ndim == 4:
         # Layout: (batch, seqlen, heads, dim)
         if x.shape[1] == seq_len:
-            cos = cos.unsqueeze(2)
-            sin = sin.unsqueeze(2)
+            # We need cos to broadcast with (batch, seqlen, heads, dim).
+            # If cos is (seqlen, dim), unsqueeze at dim -2 (heads) -> (seqlen, 1, dim)
+            # If cos is (batch, seqlen, dim), unsqueeze at dim -2 (heads) -> (batch, seqlen, 1, dim)
+            cos = cos.unsqueeze(-2)
+            sin = sin.unsqueeze(-2)
             
         # Layout: (batch, heads, seqlen, dim)
         elif x.shape[2] == seq_len:
-            cos = cos.unsqueeze(1)
-            sin = sin.unsqueeze(1)
+            # We need cos to broadcast with (batch, heads, seqlen, dim).
+            # If cos is (seqlen, dim), we need it to be (1, seqlen, dim) so it aligns with (heads, seqlen, dim)
+            # Wait, PyTorch right-aligns.
+            # (seqlen, dim) right-aligned with (..., heads, seqlen, dim) will clash heads vs seqlen.
+            # So we must reshape cos to (..., 1, seqlen, dim).
+            if cos.ndim == 2:
+                cos = cos.unsqueeze(0)  # (1, seqlen, dim)
+                sin = sin.unsqueeze(0)
+            elif cos.ndim == 3:
+                cos = cos.unsqueeze(1)  # (batch, 1, seqlen, dim)
+                sin = sin.unsqueeze(1)
             
     elif x.ndim == 3:
         # Layout: (total_tokens, heads, dim)
-        cos = cos.unsqueeze(1)
-        sin = sin.unsqueeze(1)
+        if cos.ndim == 2:
+            cos = cos.unsqueeze(-2)
+            sin = sin.unsqueeze(-2)
+
+    print("cos shape after:", cos.shape)
+    print("sin shape after:", sin.shape)
 
 
     return torch.cat(
