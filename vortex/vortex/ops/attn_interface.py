@@ -1126,7 +1126,12 @@ def _sdpa_flash_attn_with_kvcache(q, k_cache, v_cache, k=None, v=None, cache_seq
         batch_size = q.shape[0]
         seqlen_new = k.shape[1]
         for i in range(batch_size):
-            seq_len = cache_seqlens[i] if cache_seqlens is not None else 0
+            if cache_seqlens is None:
+                seq_len = 0
+            elif isinstance(cache_seqlens, int):
+                seq_len = cache_seqlens
+            else:
+                seq_len = cache_seqlens[i]
             k_cache[i, seq_len:seq_len+seqlen_new] = k[i]
             v_cache[i, seq_len:seq_len+seqlen_new] = v[i]
 
@@ -1153,8 +1158,13 @@ def _sdpa_flash_attn_with_kvcache(q, k_cache, v_cache, k=None, v=None, cache_seq
 
     attn_mask = None
     if cache_seqlens is not None:
+        if isinstance(cache_seqlens, int):
+            cache_seqlens_tensor = torch.tensor([cache_seqlens] * b, device=q.device)
+        else:
+            cache_seqlens_tensor = cache_seqlens
+            
         # Create padding mask for the KV cache
-        mask = torch.arange(s_k, device=q.device).expand(b, s_k) < cache_seqlens.unsqueeze(1)
+        mask = torch.arange(s_k, device=q.device).expand(b, s_k) < cache_seqlens_tensor.unsqueeze(1)
         attn_mask = torch.zeros((b, 1, s_q, s_k), dtype=q.dtype, device=q.device)
         attn_mask.masked_fill_(~mask.unsqueeze(1).unsqueeze(2), float('-inf'))
         is_causal = False
