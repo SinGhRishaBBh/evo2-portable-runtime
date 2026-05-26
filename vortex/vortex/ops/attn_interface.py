@@ -1065,12 +1065,18 @@ def _sdpa_flash_attn_func(q, k, v, dropout_p, softmax_scale, causal, window_size
     else:
         is_causal = causal
 
+    q_fp32 = q.float()
+    k_fp32 = k.float()
+    v_fp32 = v.float()
+    attn_mask_fp32 = attn_mask.float() if attn_mask is not None and attn_mask.is_floating_point() else attn_mask
+
     out = F.scaled_dot_product_attention(
-        q, k, v,
-        attn_mask=attn_mask,
+        q_fp32, k_fp32, v_fp32,
+        attn_mask=attn_mask_fp32,
         dropout_p=dropout_p if torch.is_grad_enabled() else 0.0,
         is_causal=is_causal
     )
+    out = out.to(q.dtype)
 
     out = out.transpose(1, 2).contiguous()
     if return_attn_probs:
@@ -1190,12 +1196,18 @@ def _sdpa_flash_attn_with_kvcache(q, k_cache, v_cache, k=None, v=None, cache_seq
     else:
         is_causal = causal
 
+    q_fp32 = q_tmp.float()
+    k_fp32 = k_tmp.float()
+    v_fp32 = v_tmp.float()
+    attn_mask_fp32 = attn_mask.float() if attn_mask is not None and attn_mask.is_floating_point() else attn_mask
+
     out = F.scaled_dot_product_attention(
-        q_tmp, k_tmp, v_tmp,
-        attn_mask=attn_mask,
+        q_fp32, k_fp32, v_fp32,
+        attn_mask=attn_mask_fp32,
         dropout_p=0.0,
         is_causal=is_causal
     )
+    out = out.to(q_tmp.dtype)
     
     out = out.transpose(1, 2).contiguous()
     if return_softmax_lse:
