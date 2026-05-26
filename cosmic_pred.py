@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Evo2 (1B) Inference Pipeline — Production Execution
+Evo2 (7B) Inference Pipeline — Production Execution
 ===================================================
-Automated variant scoring with Evo2-1B on genomic datasets.
+Automated variant scoring with Evo2-7B on genomic datasets.
 Features:
   - Persistent background execution support
   - Incremental result writing & checkpointing
@@ -163,8 +163,8 @@ def setup_logging(log_path: Path):
     return logger
 
 def main():
-    parser = argparse.ArgumentParser(description="Evo2 1B Inference Pipeline")
-    parser.add_argument("--model", default="evo2-1b", help="Model name or path")
+    parser = argparse.ArgumentParser(description="Evo2 7B Inference Pipeline")
+    parser.add_argument("--model", default="evo2_7b", help="Model name or path")
     parser.add_argument("--input", required=True, help="Input CSV path")
     parser.add_argument("--output", required=True, help="Output CSV path")
     parser.add_argument("--batch_size", type=int, default=32)
@@ -172,18 +172,18 @@ def main():
     parser.add_argument("--num_workers", type=int, default=4)
     parser.add_argument("--pin_memory", type=lambda x: str(x).lower() == 'true', default=True)
     parser.add_argument("--prefetch_factor", type=int, default=2)
-    parser.add_argument("--reference", default="/home/rishabh/evo2/reference/Homo_sapiens.GRCh37.dna.primary_assembly.fa")
+    parser.add_argument("--reference", required=True, help="Path to reference FASTA (e.g., hg38.fa)")
     parser.add_argument("--half_window", type=int, default=200)
     args = parser.parse_args()
 
     # Paths
     out_path = Path(args.output)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    log_path = Path("/home/rishabh/evo2/logs/evo2_run.log")
+    log_path = Path("./logs/evo2_run.log")
     
     logger = setup_logging(log_path)
     logger.info("=" * 70)
-    logger.info("EVO2 (1B) PRODUCTION INFERENCE PIPELINE")
+    logger.info("EVO2 (7B) PRODUCTION INFERENCE PIPELINE")
     logger.info("=" * 70)
     
     # Safely check CUDA availability
@@ -220,8 +220,7 @@ def main():
         # Note: We already updated sys.path at the top of the file to prioritize the portable runtime
         from evo2.models import Evo2
         
-        # Map user arg 'evo2-1b' to actual internal name if needed
-        model_name = "evo2_1b_base" if args.model == "evo2-1b" else args.model
+        model_name = args.model
         logger.info(f"Initializing portable Evo2 runtime for {model_name}...")
         
         model = Evo2(model_name)
