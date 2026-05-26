@@ -664,6 +664,8 @@ class RotaryEmbedding(torch.nn.Module):
         seqlen = qkv.shape[1]
         if max_seqlen is not None:
             self._update_cos_sin_cache(max_seqlen, device=qkv.device, dtype=qkv.dtype)
+        elif isinstance(seqlen_offset, torch.Tensor):
+            self._update_cos_sin_cache(seqlen + int(seqlen_offset.max().item()), device=qkv.device, dtype=qkv.dtype)
         elif isinstance(seqlen_offset, int):
             self._update_cos_sin_cache(seqlen + seqlen_offset, device=qkv.device, dtype=qkv.dtype)
         if kv is None:
@@ -714,3 +716,10 @@ class RotaryEmbedding(torch.nn.Module):
                     seqlen_offsets=seqlen_offset,
                 )
             return q, kv
+
+    def reset(self):
+        self._seq_len_cached = 0
+        self._cos_cached = None
+        self._sin_cached = None
+        self._cos_k_cached = None
+        self._sin_k_cached = None

@@ -677,7 +677,21 @@ class StripedHyena(nn.Module):
 
         self.logger.info("Initialized model")
 
+    def reset_inference_state(self):
+        """
+        Resets and clears all internal inference caches and rotary embedding caches
+        across all layers in the model to guarantee absolute state isolation.
+        """
+        for block in self.blocks:
+            if hasattr(block, "inner_mha_cls"):
+                mha = block.inner_mha_cls
+                if hasattr(mha, "rotary_emb") and mha.rotary_emb is not None:
+                    mha.rotary_emb.reset()
+
     def forward(self, x, inference_params_dict=None, padding_mask=None):
+        if inference_params_dict is None:
+            self.reset_inference_state()
+
         L = x.shape[1]
         if self.print_activations:
             activations_logger.info(f"pre embedding: {x}, {x.min()}, {x.max()}")

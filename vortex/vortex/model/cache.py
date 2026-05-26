@@ -24,6 +24,8 @@ class InferenceParams:
         self.max_seqlen = max_seqlen
         self.max_batch_size = max_batch_size
         self.seqlen_offset = 0
+        self.batch_size_offset = 0
+        self.key_value_memory_dict.clear()
         if self.lengths_per_sample is not None:
             self.lengths_per_sample.zero_()
 
@@ -42,6 +44,8 @@ class HyenaCascadeIIRInferenceParams:
         self.fir_filter_length = 3
         self.state_dim = 16
         self.seqlen_offset = 0
+        self.fir_state_dict.clear()
+        self.state_dict.clear()
 
 
 @dataclass
@@ -59,3 +63,6 @@ class HyenaCascadeFIRInferenceParams:
         self.fir_filter_length = 3
         self.fir_inner_filter_length = 4
         self.seqlen_offset = 0
+        self.fir_inner_state_dict.clear()
+        self.fir_state_dict.clear()
+        self.state_dict.clear()

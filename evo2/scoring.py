@@ -67,8 +67,20 @@ def _score_sequences(
         device: str = 'cuda:0',
 ) -> List[float]:
     """Helper function to score a list of sequences based on their logprobs."""
+    # Reset internal inference and rotary caches to guarantee absolute isolation
+    if hasattr(model, "reset_inference_state"):
+        model.reset_inference_state()
+
     input_ids, seq_lengths = prepare_batch(seqs, tokenizer, device=device, prepend_bos=prepend_bos)
     assert len(seq_lengths) == input_ids.shape[0]
+
+    # --- TEMPORARY DIAGNOSTIC LOGGING ---
+    print("=== SCORING STATE ISOLATION DIAGNOSTIC ===")
+    print(f"Batch size: {input_ids.shape[0]}")
+    print(f"Sequence lengths: {seq_lengths}")
+    print(f"Input tensor ID: {id(input_ids)}")
+    print(f"Model object ID: {id(model)}")
+    print("==========================================")
 
     with torch.inference_mode():
         logits, _ = model(input_ids) # (batch, length, vocab)
