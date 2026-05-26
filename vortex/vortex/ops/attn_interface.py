@@ -1182,13 +1182,27 @@ def _sdpa_flash_attn_with_kvcache(q, k_cache, v_cache, k=None, v=None, cache_seq
         mask = torch.arange(s_k_valid, device=q.device).expand(b, s_k_valid) < valid_seqlens.unsqueeze(1)
         attn_mask = torch.zeros((b, 1, s_q, s_k_valid), dtype=q.dtype, device=q.device)
         
-        if s_q > 1 and causal:
+        if causal:
             # Rigorous causal masking for chunked queries decoding over a KV-cache
             q_idx = torch.arange(s_q, device=q.device).unsqueeze(1)
             k_idx = torch.arange(s_k_valid, device=q.device).unsqueeze(0)
             causal_mask = k_idx < (cache_seqlens_tensor.view(b, 1, 1) + q_idx + 1)
             valid_mask = mask.unsqueeze(1).unsqueeze(2) & causal_mask.unsqueeze(1)
             attn_mask.masked_fill_(~valid_mask, float('-inf'))
+            
+            # --- TEMPORARY DIAGNOSTIC PRINTS ---
+            print("--- CAUSAL MASK DEBUG ---")
+            print(f"q.shape: {q.shape}")
+            if k is not None: print(f"k.shape: {k.shape}")
+            print(f"cache_seqlens: {cache_seqlens_tensor.tolist()}")
+            print(f"Computed causal_mask shape: {causal_mask.shape}")
+            print(f"q_idx shape: {q_idx.shape}, k_idx shape: {k_idx.shape}")
+            # Print visible key ranges for the first batch
+            b_idx = 0
+            for i in range(min(3, s_q)):  # Just first 3 queries
+                visible = valid_mask[b_idx, 0, i, :].nonzero().squeeze(-1)
+                print(f"Query {i} sees keys: {visible.tolist() if visible.numel() > 0 else []}")
+            print("-------------------------")
         else:
             attn_mask.masked_fill_(~mask.unsqueeze(1).unsqueeze(2), float('-inf'))
             
