@@ -49,25 +49,62 @@ def apply_rotary_emb_torch(x, cos, sin, interleaved=False, seqlen_offsets=0):
             seqlen_x = x.shape[2]
             
     # Slice the rotary cache to the active runtime sequence window
-    if isinstance(seqlen_offsets, torch.Tensor):
-        # If seqlen_offsets is a tensor, we might need advanced gathering, but typically for 
-        # standard fallback we can assume homogeneous or single sequence. 
-        # For simplicity in PyTorch fallback, if it's a tensor we take the first element if homogeneous.
-        offset = seqlen_offsets[0].item() if seqlen_offsets.numel() > 0 else 0
+    is_batched_offset = isinstance(seqlen_offsets, torch.Tensor) and seqlen_offsets.numel() > 1
+    
+    if is_batched_offset:
+        seqlen_offsets_t = seqlen_offsets.to(x.device)
+        batch_size = seqlen_offsets_t.shape[0]
+        actual_batch = x.shape[0] if x.ndim == 4 else 1 # basic fallback safety
+        if batch_size != actual_batch and x.ndim == 4:
+            seqlen_offsets_t = seqlen_offsets_t[:actual_batch]
+            batch_size = actual_batch
+            
+        seq_idx = torch.arange(seqlen_x, device=x.device)
+        pos_idx = seqlen_offsets_t.unsqueeze(1) + seq_idx.unsqueeze(0)
+        
+        if cos.ndim == 2:
+            cos_sliced = cos[pos_idx]
+            sin_sliced = sin[pos_idx]
+        elif cos.ndim == 3:
+            batch_idx = torch.arange(batch_size, device=x.device).unsqueeze(1)
+            cos_sliced = cos[batch_idx, pos_idx]
+            sin_sliced = sin[batch_idx, pos_idx]
+            
+        cos, sin = cos_sliced, sin_sliced
     else:
-        offset = seqlen_offsets
-
-    # Slice the cos/sin cache.
-    # Note: If cos is (batch, max_seqlen, dim), we slice dimension 1. If (max_seqlen, dim), dimension 0.
-    if cos.ndim == 3:
-        cos = cos[:, offset : offset + seqlen_x]
-        sin = sin[:, offset : offset + seqlen_x]
-    else:
-        cos = cos[offset : offset + seqlen_x]
-        sin = sin[offset : offset + seqlen_x]
+        offset = seqlen_offsets.item() if isinstance(seqlen_offsets, torch.Tensor) else seqlen_offsets
+        if cos.ndim == 3:
+            cos = cos[:, offset : offset + seqlen_x]
+            sin = sin[:, offset : offset + seqlen_x]
+        else:
+            cos = cos[offset : offset + seqlen_x]
+            sin = sin[offset : offset + seqlen_x]
 
     ro_dim = cos.shape[-1] * 2
     assert ro_dim <= x.shape[-1]
+
+    # --- TEMPORARY DIAGNOSTIC PRINTS ---
+    print("--- ROTARY DIAGNOSTIC PRINTS ---")
+    print(f"1. x.shape: {x.shape}")
+    print(f"2. seqlen_offsets: {seqlen_offsets.tolist() if isinstance(seqlen_offsets, torch.Tensor) else seqlen_offsets}")
+    print(f"3. Inferred seqlen_x: {seqlen_x}")
+    print(f"4. ro_dim: {ro_dim}")
+    if is_batched_offset:
+        # Log only first few to avoid terminal spam
+        print(f"5/6/7. Exact cos/sin pos_idx (token positions) used for first 2 seqs:\n{pos_idx[:2].tolist()}")
+    else:
+        print(f"5/6/7. Exact cos/sin slice ranges used: [{offset} : {offset + seqlen_x}]")
+    
+    decode_type = "single-token decode" if seqlen_x == 1 else ("chunked decode / KV-cache continuation" if (is_batched_offset or offset > 0) else "prefill")
+    print(f"9. Decode type: {decode_type}")
+    print("--------------------------------")
+
+    # To stable FP32 for rotary multiplication
+    orig_dtype = x.dtype
+    if orig_dtype == torch.bfloat16:
+        cos = cos.float()
+        sin = sin.float()
+
     cos = repeat(cos, "... d -> ... (2 d)" if not interleaved else "... d -> ... (d 2)")
     sin = repeat(sin, "... d -> ... (2 d)" if not interleaved else "... d -> ... (d 2)")
 
@@ -77,22 +114,14 @@ def apply_rotary_emb_torch(x, cos, sin, interleaved=False, seqlen_offsets=0):
     if x.ndim == 4:
         # Layout: (batch, seqlen, heads, dim)
         if x.shape[1] == seq_len:
-            # We need cos to broadcast with (batch, seqlen, heads, dim).
-            # If cos is (seqlen, dim), unsqueeze at dim -2 (heads) -> (seqlen, 1, dim)
-            # If cos is (batch, seqlen, dim), unsqueeze at dim -2 (heads) -> (batch, seqlen, 1, dim)
             cos = cos.unsqueeze(-2)
             sin = sin.unsqueeze(-2)
             
         # Layout: (batch, heads, seqlen, dim)
         elif x.shape[2] == seq_len:
-            # We need cos to broadcast with (batch, heads, seqlen, dim).
-            # If cos is (seqlen, dim), we need it to be (1, seqlen, dim) so it aligns with (heads, seqlen, dim)
-            # Wait, PyTorch right-aligns.
-            # (seqlen, dim) right-aligned with (..., heads, seqlen, dim) will clash heads vs seqlen.
-            # So we must reshape cos to (..., 1, seqlen, dim).
             if cos.ndim == 2:
-                cos = cos.unsqueeze(0)  # (1, seqlen, dim)
-                sin = sin.unsqueeze(0)
+                cos = cos.unsqueeze(0).unsqueeze(1)  # explicitly (1, 1, seqlen, dim)
+                sin = sin.unsqueeze(0).unsqueeze(1)
             elif cos.ndim == 3:
                 cos = cos.unsqueeze(1)  # (batch, 1, seqlen, dim)
                 sin = sin.unsqueeze(1)
@@ -103,17 +132,17 @@ def apply_rotary_emb_torch(x, cos, sin, interleaved=False, seqlen_offsets=0):
             cos = cos.unsqueeze(-2)
             sin = sin.unsqueeze(-2)
 
-    print("cos shape after:", cos.shape)
-    print("sin shape after:", sin.shape)
+    print(f"8. Final broadcasted cos shape: {cos.shape}, sin shape: {sin.shape}")
 
+    # Ensure stable rotary mult
+    x_ro = x[..., :ro_dim]
+    if orig_dtype == torch.bfloat16:
+        x_ro = x_ro.float()
+    
+    out_ro = x_ro * cos + rotate_half(x_ro, interleaved) * sin
+    out_ro = out_ro.to(orig_dtype)
 
-    return torch.cat(
-        [
-            x[..., :ro_dim] * cos + rotate_half(x[..., :ro_dim], interleaved) * sin,
-            x[..., ro_dim:],
-        ],
-        dim=-1,
-    )
+    return torch.cat([out_ro, x[..., ro_dim:]], dim=-1)
 
 
 # ---------------------------------------------------------------------------
