@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Evo2 (7B) Inference Pipeline — Production Execution
-===================================================
+Evo2 7B Portable Runtime Inference Pipeline — Production Execution
+==================================================================
 Automated variant scoring with Evo2-7B on genomic datasets.
 Features:
   - Persistent background execution support
@@ -13,7 +13,7 @@ Features:
 import os
 import sys
 
-# 1. HPC PORTABILITY: Ensure portable runtime is prioritized over globally installed packages
+# 3. Ensure portable runtime is prioritized over globally installed packages at absolute top
 sys.path.insert(0, os.path.expanduser("~/evo2-portable-runtime"))
 
 import csv
@@ -163,7 +163,8 @@ def setup_logging(log_path: Path):
     return logger
 
 def main():
-    parser = argparse.ArgumentParser(description="Evo2 7B Inference Pipeline")
+    parser = argparse.ArgumentParser(description="Evo2 7B Portable Runtime Inference Pipeline")
+    # 1. Default model set to evo2_7b
     parser.add_argument("--model", default="evo2_7b", help="Model name or path")
     parser.add_argument("--input", required=True, help="Input CSV path")
     parser.add_argument("--output", required=True, help="Output CSV path")
@@ -172,31 +173,35 @@ def main():
     parser.add_argument("--num_workers", type=int, default=4)
     parser.add_argument("--pin_memory", type=lambda x: str(x).lower() == 'true', default=True)
     parser.add_argument("--prefetch_factor", type=int, default=2)
-    parser.add_argument("--reference", required=True, help="Path to reference FASTA (e.g., hg38.fa)")
+    # 5. Remove hardcoded reference genome and make required
+    parser.add_argument(
+        "--reference",
+        required=True,
+        help="Reference FASTA path"
+    )
     parser.add_argument("--half_window", type=int, default=200)
     args = parser.parse_args()
 
-    # Paths
+    # 4. Fix logging path to be portable
     out_path = Path(args.output)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     log_path = Path("./logs/evo2_run.log")
     
     logger = setup_logging(log_path)
     logger.info("=" * 70)
-    logger.info("EVO2 (7B) PRODUCTION INFERENCE PIPELINE")
+    logger.info("EVO2 (7B) PORTABLE RUNTIME PRODUCTION INFERENCE PIPELINE")
     logger.info("=" * 70)
     
-    # Safely check CUDA availability
-    actual_device = args.device
-    if actual_device.startswith("cuda") and not torch.cuda.is_available():
-        logger.warning("CUDA requested but not available. Falling back to CPU. Performance will be degraded.")
-        actual_device = "cpu"
+    # 6. Safe CUDA Fallback
+    if args.device == "cuda" and not torch.cuda.is_available():
+        logger.warning("CUDA requested but unavailable. Falling back to CPU.")
+        args.device = "cpu"
         
     logger.info(f"Model       : {args.model}")
     logger.info(f"Input       : {args.input}")
     logger.info(f"Output      : {args.output}")
     logger.info(f"Batch Size  : {args.batch_size}")
-    logger.info(f"Device      : {actual_device}")
+    logger.info(f"Device      : {args.device}")
     
     # 1. Load Data
     try:
@@ -204,8 +209,8 @@ def main():
         # Column normalization
         col_map = {}
         for c in df.columns:
-            cl = c.lower()
-            if cl in ("chrom", "chromosome"): col_map[c] = "CHROM"
+            cl = c.lower().strip()
+            if cl in ("chrm", "chrom", "chromosome", "chr", "#chrom"): col_map[c] = "CHROM"
             elif cl in ("pos", "position", "genome_start"): col_map[c] = "POS"
             elif cl in ("ref", "reference", "genomic_wt_allele"): col_map[c] = "REF"
             elif cl in ("alt", "alternate", "genomic_mut_allele"): col_map[c] = "ALT"
@@ -217,18 +222,18 @@ def main():
 
     # 2. Load Model using Portable Runtime
     try:
-        # Note: We already updated sys.path at the top of the file to prioritize the portable runtime
         from evo2.models import Evo2
         
+        # 2. Remove legacy model remapping
         model_name = args.model
         logger.info(f"Initializing portable Evo2 runtime for {model_name}...")
         
         model = Evo2(model_name)
-        if actual_device == "cuda":
+        if args.device == "cuda":
             model.model = model.model.to("cuda")
         model.model.eval()
         
-        logger.info("Model loaded successfully into adaptive runtime.")
+        logger.info("Model loaded successfully into portable runtime.")
     except Exception as e:
         logger.error(f"Failed to load Evo2 model: {e}")
         logger.error(traceback.format_exc())
@@ -248,7 +253,6 @@ def main():
     )
 
     # 4. Inference Loop
-    results = []
     t0 = time.time()
     
     # Write header if new file
@@ -274,6 +278,10 @@ def main():
                     all_seqs.extend([ref_seqs[i], mut_seqs[i]])
                 
                 try:
+                    # 7. Strict Inference-State Reset for determinism
+                    if hasattr(model.model, "reset_inference_state"):
+                        model.model.reset_inference_state()
+
                     with torch.no_grad():
                         scores = model.score_sequences(
                             all_seqs, 
@@ -302,25 +310,27 @@ def main():
                 except RuntimeError as re:
                     if "CUDA out of memory" in str(re):
                         logger.error(f"OOM on Batch {batch_idx}. Clearing cache and skipping...")
-                        if torch.cuda.is_available():
-                            torch.cuda.empty_cache()
-                            gc.collect()
                     else:
                         logger.error(f"Batch {batch_idx} runtime error: {re}")
                         logger.debug(traceback.format_exc())
                 except Exception as e:
                     logger.error(f"Batch {batch_idx} scoring failed: {e}")
                     logger.debug(traceback.format_exc())
+                finally:
+                    # 8. Safe GPU Cache Cleanup after scoring batches
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                        gc.collect()
             
-            # Log progress and strictly manage memory
+            # Log progress and cleanup
             if (batch_idx + 1) % 10 == 0:
                 elapsed = time.time() - t0
                 rate = (batch_idx + 1) * args.batch_size / elapsed
                 logger.info(f"Processed { (batch_idx+1)*args.batch_size } variants... Rate: {rate:.1f}/s")
                 f.flush()
-                # Safe empty cache
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
+                    gc.collect()
 
     logger.info("=" * 70)
     logger.info(f"Inference complete. Results saved to {args.output}")
