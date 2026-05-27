@@ -215,9 +215,99 @@ def main():
             elif cl in ("ref", "reference", "genomic_wt_allele"): col_map[c] = "REF"
             elif cl in ("alt", "alternate", "genomic_mut_allele"): col_map[c] = "ALT"
         df = df.rename(columns=col_map)
-        logger.info(f"Loaded {len(df)} variants from CSV.")
+        
+        total_rows = len(df)
+        logger.info(f"Loaded {total_rows} variants from CSV.")
+        
+        # Production Genomic Variant Preprocessing & Validation Checkpoint
+        valid_bases = {"A", "C", "G", "T"}
+        valid_chroms = {
+            "1","2","3","4","5","6","7","8","9","10",
+            "11","12","13","14","15","16","17","18",
+            "19","20","21","22","X","Y","MT"
+        }
+        
+        valid_rows = []
+        rejected_counts = {
+            "missing_chrom": 0,
+            "invalid_chrom": 0,
+            "missing_pos": 0,
+            "missing_allele": 0,
+            "invalid_length": 0,
+            "invalid_base": 0
+        }
+        
+        for idx, row in df.iterrows():
+            chrom = row.get("CHROM")
+            pos = row.get("POS")
+            ref = row.get("REF")
+            alt = row.get("ALT")
+            
+            # 1. Validate Chromosome Presence
+            if pd.isna(chrom):
+                logger.warning(f"Row {idx}: Rejected variant. Chromosome is missing.")
+                rejected_counts["missing_chrom"] += 1
+                continue
+                
+            # Normalize Chromosome
+            chrom_norm = str(chrom).replace("chr", "").strip().upper()
+            if chrom_norm not in valid_chroms:
+                logger.warning(f"Row {idx}: Rejected variant. Chromosome '{chrom}' is invalid.")
+                rejected_counts["invalid_chrom"] += 1
+                continue
+                
+            # 2. Validate Position Presence
+            if pd.isna(pos):
+                logger.warning(f"Row {idx}: Rejected variant at chrom '{chrom_norm}'. Position is missing.")
+                rejected_counts["missing_pos"] += 1
+                continue
+                
+            # 3. Validate REF/ALT Presence
+            if pd.isna(ref) or pd.isna(alt):
+                logger.warning(f"Row {idx}: Rejected variant at {chrom_norm}:{pos}. REF='{ref}', ALT='{alt}' has missing allele.")
+                rejected_counts["missing_allele"] += 1
+                continue
+                
+            # Normalize Alleles
+            ref_norm = str(ref).strip().upper()
+            alt_norm = str(alt).strip().upper()
+            
+            # 4. Validate REF/ALT Length (strictly SNV)
+            if len(ref_norm) != 1 or len(alt_norm) != 1:
+                logger.warning(f"Row {idx}: Rejected variant at {chrom_norm}:{pos}. REF='{ref_norm}', ALT='{alt_norm}' has invalid length (strictly must be SNV length of 1).")
+                rejected_counts["invalid_length"] += 1
+                continue
+                
+            # 5. Validate Canonical Base
+            if ref_norm not in valid_bases or alt_norm not in valid_bases:
+                logger.warning(f"Row {idx}: Rejected variant at {chrom_norm}:{pos}. REF='{ref_norm}', ALT='{alt_norm}' contains non-canonical DNA bases.")
+                rejected_counts["invalid_base"] += 1
+                continue
+                
+            # Store updated normalized values
+            row_dict = row.to_dict()
+            row_dict["CHROM"] = chrom_norm
+            row_dict["REF"] = ref_norm
+            row_dict["ALT"] = alt_norm
+            row_dict["POS"] = int(pos)
+            valid_rows.append(row_dict)
+            
+        df = pd.DataFrame(valid_rows) if valid_rows else pd.DataFrame(columns=df.columns)
+        total_rejected = sum(rejected_counts.values())
+        
+        logger.info("=" * 60)
+        logger.info("=== GENOMIC VARIANT PREPROCESSING & VALIDATION REPORT ===")
+        logger.info(f"Total Rows Checked : {total_rows}")
+        logger.info(f"Valid Rows Passed  : {len(df)}")
+        logger.info(f"Rejected Rows      : {total_rejected}")
+        logger.info("Rejection Breakdown:")
+        for category, count in rejected_counts.items():
+            logger.info(f"  - {category:<15} : {count}")
+        logger.info("=" * 60)
+        
     except Exception as e:
-        logger.error(f"Failed to load input CSV: {e}")
+        logger.error(f"Failed to load/validate input CSV: {e}")
+        logger.error(traceback.format_exc())
         return
 
     # 2. Load Model using Portable Runtime
@@ -333,6 +423,13 @@ def main():
                     gc.collect()
 
     logger.info("=" * 70)
+    logger.info("=== FINAL PRODUCTION RUN SUMMARY ===")
+    logger.info(f"Total Valid Variants Scored : {len(df)}")
+    logger.info(f"Total Rejected Variants     : {total_rejected}")
+    logger.info("Rejection Breakdown:")
+    for category, count in rejected_counts.items():
+        logger.info(f"  - {category:<15} : {count}")
+    logger.info("====================================")
     logger.info(f"Inference complete. Results saved to {args.output}")
     logger.info("=" * 70)
 
