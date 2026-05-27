@@ -76,19 +76,27 @@ class IndexedFasta:
 
 def get_context(
     chrom: str, pos: int, ref: str, alt: str,
-    fasta: IndexedFasta, half_window: int = 200
+    fasta: IndexedFasta, half_window: int = 512,
+    logger: Optional[logging.Logger] = None,
 ) -> Optional[Tuple[str, str]]:
-    """Return (ref_seq, mut_seq) centered on the variant."""
+    """Return SNV contexts as left flank + allele + right flank."""
     p0 = pos - 1
     start_0 = max(0, p0 - half_window)
-    end_0 = p0 + half_window
+    end_0 = p0 + len(ref) + half_window
     
     seq = fasta.fetch(chrom, start_0, end_0)
     if seq:
         rel = p0 - start_0
         if rel < 0 or rel >= len(seq): return None
-        if seq[rel] != ref: return None # Allele mismatch
-        mut = seq[:rel] + alt + seq[rel + 1:]
+        ref_base_from_genome = seq[rel : rel + len(ref)]
+        if ref_base_from_genome != ref:
+            if logger is not None:
+                logger.warning(
+                    f"REF allele mismatch at {chrom}:{pos}. "
+                    f"Genome={ref_base_from_genome}, Input={ref}. Skipping."
+                )
+            return None
+        mut = seq[:rel] + alt + seq[rel + len(ref):]
         return seq, mut
     return None
 
@@ -97,10 +105,11 @@ def get_context(
 # ---------------------------------------------------------------------------
 
 class VariantDataset(Dataset):
-    def __init__(self, df: pd.DataFrame, fasta: IndexedFasta, half_window: int):
+    def __init__(self, df: pd.DataFrame, fasta: IndexedFasta, half_window: int, logger=None):
         self.df = df
         self.fasta = fasta
         self.half_window = half_window
+        self.logger = logger
 
     def __len__(self):
         return len(self.df)
@@ -113,7 +122,7 @@ class VariantDataset(Dataset):
         alt = str(row["ALT"])
         vid = f"{chrom}_{pos}_{ref}_{alt}"
         
-        ctx = get_context(chrom, pos, ref, alt, self.fasta, self.half_window)
+        ctx = get_context(chrom, pos, ref, alt, self.fasta, self.half_window, self.logger)
         if ctx:
             return {
                 "id": vid, 
@@ -179,7 +188,7 @@ def main():
         required=True,
         help="Reference FASTA path"
     )
-    parser.add_argument("--half_window", type=int, default=200)
+    parser.add_argument("--half_window", type=int, default=512)
     args = parser.parse_args()
 
     # 4. Fix logging path to be portable
@@ -331,7 +340,7 @@ def main():
 
     # 3. Setup DataLoader
     fasta = IndexedFasta(args.reference)
-    dataset = VariantDataset(df, fasta, args.half_window)
+    dataset = VariantDataset(df, fasta, args.half_window, logger=logger)
     dataloader = DataLoader(
         dataset, 
         batch_size=args.batch_size,

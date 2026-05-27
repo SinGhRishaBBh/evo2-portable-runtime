@@ -117,10 +117,10 @@ def local_context(
 def portable_context(
     fasta: IndexedFasta, chrom: str, pos: int, ref: str, alt: str, half_window: int
 ) -> Dict[str, Any]:
-    """Mirror cosmic_pred.py:get_context, including its exclusive end coordinate."""
+    """Mirror cosmic_pred.py:get_context after context-window parity correction."""
     index_0 = pos - 1
     start_0 = max(0, index_0 - half_window)
-    end_0 = index_0 + half_window
+    end_0 = index_0 + len(ref) + half_window
     sequence = fasta.fetch(chrom, start_0, end_0) or ""
     relative_index = index_0 - start_0
     observed_ref = sequence[relative_index : relative_index + len(ref)]
@@ -138,7 +138,7 @@ def portable_context(
         "mutant_sequence": mutant if matches_reference else None,
         "candidate_reference_sequence": sequence if not matches_reference else None,
         "total_context_length": len(sequence),
-        "source_semantics": "cosmic_pred.py:get_context: [pos-half_window, pos+half_window) interval",
+        "source_semantics": "cosmic_pred.py:get_context: left flank + allele + right flank",
     }
 
 
@@ -343,7 +343,7 @@ def main() -> None:
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--local-left", type=int, default=512)
     parser.add_argument("--local-right", type=int, default=512)
-    parser.add_argument("--portable-half-window", type=int, default=200)
+    parser.add_argument("--portable-half-window", type=int, default=512)
     parser.add_argument("--prepend-bos", action="store_true")
     parser.add_argument("--reduction", choices=("sum", "mean"), default="sum")
     parser.add_argument("--run-model", action="store_true", help="Load Evo2 and capture logits/logprob/reduction stages.")
