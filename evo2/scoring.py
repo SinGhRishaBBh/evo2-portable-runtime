@@ -74,14 +74,6 @@ def _score_sequences(
     input_ids, seq_lengths = prepare_batch(seqs, tokenizer, device=device, prepend_bos=prepend_bos)
     assert len(seq_lengths) == input_ids.shape[0]
 
-    # --- TEMPORARY DIAGNOSTIC LOGGING ---
-    print("=== SCORING STATE ISOLATION DIAGNOSTIC ===")
-    print(f"Batch size: {input_ids.shape[0]}")
-    print(f"Sequence lengths: {seq_lengths}")
-    print(f"Input tensor ID: {id(input_ids)}")
-    print(f"Model object ID: {id(model)}")
-    print("==========================================")
-
     with torch.inference_mode():
         logits, _ = model(input_ids) # (batch, length, vocab)
 
@@ -95,8 +87,32 @@ def _score_sequences(
     else:
         raise ValueError(f'Invalid reduce_method {reduce_method}')
 
+    # --- TEMPORARY DIAGNOSTIC LOGGING ---
+    print("=== SCORING SEMANTICS DIAGNOSTIC ===")
+    print(f"Batch size: {input_ids.shape[0]}")
+    print(f"Sequence lengths: {seq_lengths}")
+    print(f"Reduction mode: {reduce_method}")
+    print(f"Prepend BOS: {prepend_bos}")
+    
+    score_lens = [seq_len - 1 + int(prepend_bos) for seq_len in seq_lengths]
+    
+    for idx, seq in enumerate(seqs):
+        score_len = score_lens[idx]
+        seq_logprobs = logprobs[idx][:score_len]
+        print(f"Sequence {idx}:")
+        print(f"  - String length: {len(seq)}")
+        print(f"  - Tokenized length: {seq_lengths[idx]}")
+        print(f"  - First 10 token IDs: {input_ids[idx][:10].tolist()}")
+        print(f"  - Last 10 token IDs: {input_ids[idx][-10:].tolist()}")
+        print(f"  - Number of scored tokens: {score_len}")
+        print(f"  - Raw per-token logprobs (first 10): {seq_logprobs[:10].tolist()}")
+        print(f"  - Summed score: {np.sum(seq_logprobs):.4f}")
+        print(f"  - Averaged score: {np.mean(seq_logprobs):.4f}")
+        print(f"  - Normalization divisor: {score_len}")
+    print("====================================")
+
     return [
-        reduce_func(logprobs[idx][:seq_lengths[idx]])
+        reduce_func(logprobs[idx][:score_lens[idx]])
         for idx in range(len(seq_lengths))
     ]
 

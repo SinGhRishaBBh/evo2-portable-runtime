@@ -158,7 +158,7 @@ class CharLevelTokenizer(AbstractTokenizer):
         return str(chr(self.clamp(token)))
 
     def tokenize(self, text: str):
-        return list(np.fromstring(text, dtype=np.uint8))
+        return list(text.encode('ascii'))
 
     def tokenize_batch(self, text_batch: Union[List[str], str]):
         if isinstance(text_batch, list):

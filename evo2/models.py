@@ -55,6 +55,15 @@ class Evo2:
             self.model = self.load_evo2_model(model_name, config_path)
         
         self.tokenizer = CharLevelTokenizer(512)
+        
+        # --- MODEL LOADING EQUIVALENCE DIAGNOSTICS ---
+        param_count = sum(p.numel() for p in self.model.parameters())
+        print("=== MODEL LOADING EQUIVALENCE ===")
+        print(f"Loaded Model Name: {model_name}")
+        print(f"Checkpoint Path: {local_path if local_path is not None else 'HuggingFace Cache'}")
+        print(f"Parameter Count: {param_count}")
+        print(f"Tokenizer Vocab Size: {self.tokenizer.vocab_size}")
+        print("================================")
     
     def forward(
         self,
