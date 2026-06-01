@@ -1191,18 +1191,20 @@ def _sdpa_flash_attn_with_kvcache(q, k_cache, v_cache, k=None, v=None, cache_seq
             attn_mask.masked_fill_(~valid_mask, float('-inf'))
             
             # --- TEMPORARY DIAGNOSTIC PRINTS ---
-            print("--- CAUSAL MASK DEBUG ---")
-            print(f"q.shape: {q.shape}")
-            if k is not None: print(f"k.shape: {k.shape}")
-            print(f"cache_seqlens: {cache_seqlens_tensor.tolist()}")
-            print(f"Computed causal_mask shape: {causal_mask.shape}")
-            print(f"q_idx shape: {q_idx.shape}, k_idx shape: {k_idx.shape}")
-            # Print visible key ranges for the first batch
-            b_idx = 0
-            for i in range(min(3, s_q)):  # Just first 3 queries
-                visible = valid_mask[b_idx, 0, i, :].nonzero().squeeze(-1)
-                print(f"Query {i} sees keys: {visible.tolist() if visible.numel() > 0 else []}")
-            print("-------------------------")
+            import builtins
+            if getattr(builtins, "debug_benchmark", True):
+                print("--- CAUSAL MASK DEBUG ---")
+                print(f"q.shape: {q.shape}")
+                if k is not None: print(f"k.shape: {k.shape}")
+                print(f"cache_seqlens: {cache_seqlens_tensor.tolist()}")
+                print(f"Computed causal_mask shape: {causal_mask.shape}")
+                print(f"q_idx shape: {q_idx.shape}, k_idx shape: {k_idx.shape}")
+                # Print visible key ranges for the first batch
+                b_idx = 0
+                for i in range(min(3, s_q)):  # Just first 3 queries
+                    visible = valid_mask[b_idx, 0, i, :].nonzero().squeeze(-1)
+                    print(f"Query {i} sees keys: {visible.tolist() if visible.numel() > 0 else []}")
+                print("-------------------------")
         else:
             attn_mask.masked_fill_(~mask.unsqueeze(1).unsqueeze(2), float('-inf'))
             

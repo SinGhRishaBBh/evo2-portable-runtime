@@ -84,20 +84,22 @@ def apply_rotary_emb_torch(x, cos, sin, interleaved=False, seqlen_offsets=0):
     assert ro_dim <= x.shape[-1]
 
     # --- TEMPORARY DIAGNOSTIC PRINTS ---
-    print("--- ROTARY DIAGNOSTIC PRINTS ---")
-    print(f"1. x.shape: {x.shape}")
-    print(f"2. seqlen_offsets: {seqlen_offsets.tolist() if isinstance(seqlen_offsets, torch.Tensor) else seqlen_offsets}")
-    print(f"3. Inferred seqlen_x: {seqlen_x}")
-    print(f"4. ro_dim: {ro_dim}")
-    if is_batched_offset:
-        # Log only first few to avoid terminal spam
-        print(f"5/6/7. Exact cos/sin pos_idx (token positions) used for first 2 seqs:\n{pos_idx[:2].tolist()}")
-    else:
-        print(f"5/6/7. Exact cos/sin slice ranges used: [{offset} : {offset + seqlen_x}]")
-    
-    decode_type = "single-token decode" if seqlen_x == 1 else ("chunked decode / KV-cache continuation" if (is_batched_offset or offset > 0) else "prefill")
-    print(f"9. Decode type: {decode_type}")
-    print("--------------------------------")
+    import builtins
+    if getattr(builtins, "debug_benchmark", True):
+        print("--- ROTARY DIAGNOSTIC PRINTS ---")
+        print(f"1. x.shape: {x.shape}")
+        print(f"2. seqlen_offsets: {seqlen_offsets.tolist() if isinstance(seqlen_offsets, torch.Tensor) else seqlen_offsets}")
+        print(f"3. Inferred seqlen_x: {seqlen_x}")
+        print(f"4. ro_dim: {ro_dim}")
+        if is_batched_offset:
+            # Log only first few to avoid terminal spam
+            print(f"5/6/7. Exact cos/sin pos_idx (token positions) used for first 2 seqs:\n{pos_idx[:2].tolist()}")
+        else:
+            print(f"5/6/7. Exact cos/sin slice ranges used: [{offset} : {offset + seqlen_x}]")
+        
+        decode_type = "single-token decode" if seqlen_x == 1 else ("chunked decode / KV-cache continuation" if (is_batched_offset or offset > 0) else "prefill")
+        print(f"9. Decode type: {decode_type}")
+        print("--------------------------------")
 
     # To stable FP32 for rotary multiplication
     orig_dtype = x.dtype
@@ -132,7 +134,8 @@ def apply_rotary_emb_torch(x, cos, sin, interleaved=False, seqlen_offsets=0):
             cos = cos.unsqueeze(-2)
             sin = sin.unsqueeze(-2)
 
-    print(f"8. Final broadcasted cos shape: {cos.shape}, sin shape: {sin.shape}")
+    if getattr(builtins, "debug_benchmark", True):
+        print(f"8. Final broadcasted cos shape: {cos.shape}, sin shape: {sin.shape}")
 
     # Ensure stable rotary mult
     x_ro = x[..., :ro_dim]

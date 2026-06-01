@@ -314,12 +314,16 @@ def generate_synthetic_inputs(num_variants: int, window: int) -> Tuple[pd.DataFr
 # CORE BENCHMARKING ORCHESTRATOR
 # ---------------------------------------------------------------------------
 import math
+import builtins
 
 class Evo2BenchmarkSuite:
     def __init__(self, args: argparse.Namespace):
         self.args = args
         self.device = torch.device(args.device)
         
+        # Centrally register debug benchmark setting
+        builtins.debug_benchmark = getattr(args, "debug_benchmark", False)
+
         # Resolve safety fallback
         if self.device.type == "cuda" and not torch.cuda.is_available():
             logger.warning("CUDA requested but unavailable. Falling back to CPU.")
@@ -337,6 +341,30 @@ class Evo2BenchmarkSuite:
 
         # Metrics aggregates
         self.aggregate_metrics: List[Dict[str, Any]] = []
+
+        # GPU / Hardware Safety Validation check
+        self._print_hardware_safety_validation()
+
+    def _print_hardware_safety_validation(self):
+        gpu_name = "N/A"
+        vram_gb = 0.0
+        if torch.cuda.is_available():
+            try:
+                gpu_name = torch.cuda.get_device_name(0)
+                vram_gb = torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)
+            except Exception:
+                pass
+        
+        print("\n================================================")
+        print("Evo2 Benchmark Runtime")
+        print("================================================")
+        print(f"GPU: {gpu_name}")
+        print(f"CUDA Available: {torch.cuda.is_available()}")
+        print(f"VRAM: {vram_gb:.2f} GB" if vram_gb > 0 else "VRAM: N/A")
+        print(f"Torch: {torch.__version__}")
+        print(f"Inference Mode: Enabled")
+        print(f"Debug Benchmark: {builtins.debug_benchmark}")
+        print("================================================\n")
 
     def load_model_and_tokenizer(self) -> Tuple[Any, Any]:
         """Loads either the authentic model or mock model."""
@@ -378,10 +406,14 @@ class Evo2BenchmarkSuite:
         sys_monitor.start()
 
         # Sweeping configurations
+        total_runs = len(self.args.windows) * len(self.args.batch_sizes)
+        run_count = 0
+        
         try:
             for window in self.args.windows:
                 for batch_size in self.args.batch_sizes:
-                    logger.info(f"Sweeping Batch Size: {batch_size} | Half-Window: {window}bp")
+                    run_count += 1
+                    logger.info(f"[RUN {run_count}/{total_runs}] batch={batch_size} window={window} variants={len(df)}")
                     
                     # Warmup run to isolate compile/caching latency
                     self._execute_inference_pipeline(
@@ -403,6 +435,7 @@ class Evo2BenchmarkSuite:
                         warmup=False
                     )
                     self.aggregate_metrics.append(metrics)
+                    logger.info(f"[RESULT] latency={metrics['total_runtime_sec']:.2f}s throughput={metrics['throughput_variants_sec']:.2f} seq/s")
                     
         finally:
             sys_monitor.stop()
@@ -478,49 +511,51 @@ class Evo2BenchmarkSuite:
             writer = csv.writer(f_out)
             writer.writerow(["variant_id", "ref_llh", "mut_llh"])
 
-            for b in range(num_batches):
-                b_start = b * batch_size
-                b_end = min(b_start + batch_size, len(ref_seqs))
-                
-                # Fetch batch slices
-                batch_ref = ref_seqs[b_start:b_end]
-                batch_mut = mut_seqs[b_start:b_end]
-                batch_vids = v_ids[b_start:b_end]
-                
-                # Flatten strings for combined scoring input
-                all_seqs = []
-                for r, m in zip(batch_ref, batch_mut):
-                    all_seqs.extend([r, m])
-                    total_tokens_processed += len(r) + len(m)
-                
-                # Measure Tokenization overhead
-                with self.timer(tokenization_tag):
-                    # Mock tokenization or standard model tokenizer trace
-                    if self.args.mock:
-                        for s in all_seqs:
-                            _ = list(s.encode("ascii"))
-                    else:
-                        for s in all_seqs:
-                            _ = model.tokenizer.tokenize(s)
-                
-                # Measure GPU inference forward pass
-                with self.timer(inference_tag):
-                    if hasattr(model.model, "reset_inference_state"):
-                        model.model.reset_inference_state()
-                        
-                    scores = model.score_sequences(
-                        all_seqs,
-                        batch_size=len(all_seqs),
-                        reduce_method="sum"
-                    )
+            # Run absolute optimized inference mode
+            with torch.inference_mode():
+                for b in range(num_batches):
+                    b_start = b * batch_size
+                    b_end = min(b_start + batch_size, len(ref_seqs))
+                    
+                    # Fetch batch slices
+                    batch_ref = ref_seqs[b_start:b_end]
+                    batch_mut = mut_seqs[b_start:b_end]
+                    batch_vids = v_ids[b_start:b_end]
+                    
+                    # Flatten strings for combined scoring input
+                    all_seqs = []
+                    for r, m in zip(batch_ref, batch_mut):
+                        all_seqs.extend([r, m])
+                        total_tokens_processed += len(r) + len(m)
+                    
+                    # Measure Tokenization overhead
+                    with self.timer(tokenization_tag):
+                        # Mock tokenization or standard model tokenizer trace
+                        if self.args.mock:
+                            for s in all_seqs:
+                                _ = list(s.encode("ascii"))
+                        else:
+                            for s in all_seqs:
+                                _ = model.tokenizer.tokenize(s)
+                    
+                    # Measure GPU inference forward pass
+                    with self.timer(inference_tag):
+                        if hasattr(model.model, "reset_inference_state"):
+                            model.model.reset_inference_state()
+                            
+                        scores = model.score_sequences(
+                            all_seqs,
+                            batch_size=len(all_seqs),
+                            reduce_method="sum"
+                        )
 
-                # Measure CSV Writing block
-                with self.timer(csv_write_tag):
-                    for i in range(len(batch_vids)):
-                        r_score = float(scores[2*i])
-                        m_score = float(scores[2*i+1])
-                        writer.writerow([batch_vids[i], r_score, m_score])
-                    f_out.flush()
+                    # Measure CSV Writing block
+                    with self.timer(csv_write_tag):
+                        for i in range(len(batch_vids)):
+                            r_score = float(scores[2*i])
+                            m_score = float(scores[2*i+1])
+                            writer.writerow([batch_vids[i], r_score, m_score])
+                        f_out.flush()
 
         t_end = time.perf_counter()
         elapsed_sec = t_end - t_start
@@ -778,9 +813,10 @@ def main():
     parser.add_argument("--reference", help="Custom genomic FASTA reference path")
     parser.add_argument("--num-variants", type=int, default=100, help="Number of variants to generate for synthetic testing")
     
-    # Execution Modality
+    # Execution Modality & Verbosity Controls
     parser.add_argument("--mock", action="store_true", help="Use a lightweight mock runtime simulating Evo2 layers without weights")
     parser.add_argument("--output-dir", default="benchmark_results", help="Directory where benchmarks metrics/plots are exported")
+    parser.add_argument("--debug-benchmark", action="store_true", help="Enable verbose diagnostics (rotary, tokenization, shapes)")
     
     args = parser.parse_args()
     
