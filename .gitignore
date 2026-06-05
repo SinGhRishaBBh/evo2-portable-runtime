@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Logs
+*.log
+logs/
+
+# Benchmark Outputs
+benchmark_large/
+benchmark_medium/
+benchmark_results/
+benchmark_test/
+
+# Runtime Outputs
+*.out
+*.err
+*.csv
+*.txt
+
+# Egg Info
+*.egg-info/
+
+# Dataset / Generated Files
+*.fa
+*.fai
+
+# Misc
+.DS_Store
