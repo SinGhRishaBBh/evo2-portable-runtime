@@ -109,26 +109,25 @@ This script executes [test_dna_generation.py](file:///d:/evo2-portable-runtime/t
 
 ---
 
-## Singularity / Apptainer Containerization
+## Infrastructure Roadmap & Future Containerization
 
-For HPC environments that restrict Docker runtime execution due to security policies, this project supports building a Singularity image (`.sif`) directly from the provided `Dockerfile`.
+### Planned Singularity / Apptainer Containerization
+Containerized Singularity-based deployment was planned as part of the future infrastructure optimization roadmap; however, benchmarking and validation for this environment were not completed during the current evaluation cycle. Current benchmarking results are limited to the actively validated bare-metal runtime environments. Singularity-based deployment and HPC container benchmarking remain outside the scope of the present assessment.
 
-### Build Workflow
-Convert the Dockerfile build layers to an Apptainer/Singularity container on a local staging machine or HPC build node:
-
-```bash
-singularity build evo2_7b_portable.sif Dockerfile
-```
-
-### HPC Execution
-Execute the containerized model within an active SLURM reservation, mounting the host cache directory to avoid repetitive HuggingFace downloads:
-
-```bash
-singularity exec --nv \
-    -B /scratch/user/.cache/huggingface:/root/.cache/huggingface \
-    evo2_7b_portable.sif \
-    python benchmark_runtime.py --batch-sizes 1 --windows 2048 --num-variants 100
-```
+Future plans to build and validate the runtime environment within Singularity include:
+* **Target Build Workflow (Planned):**
+  ```bash
+  # Future work: Convert the Dockerfile build layers to an Apptainer/Singularity container
+  singularity build evo2_7b_portable.sif Dockerfile
+  ```
+* **Target HPC Execution (Planned):**
+  ```bash
+  # Future work: Execute within a containerized SLURM reservation
+  singularity exec --nv \
+      -B /scratch/user/.cache/huggingface:/root/.cache/huggingface \
+      evo2_7b_portable.sif \
+      python benchmark_runtime.py --batch-sizes 1 --windows 2048 --num-variants 100
+  ```
 
 ---
 
