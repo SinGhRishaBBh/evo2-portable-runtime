@@ -1,284 +1,158 @@
-# Evo 2: Genome modeling and design across all domains of life
+# Evo2 7B Portable Runtime & HPC Benchmarking Infrastructure
 
-![Evo 2](evo2.jpg)
+This repository contains custom engineering, validation, and benchmarking assets designed to establish a stable, production-grade, portable runtime environment specifically for **Evo2 7B** execution on single-GPU HPC systems. 
 
-Evo 2 is a state of the art DNA language model for long context modeling and design. Evo 2 models DNA sequences at single-nucleotide resolution at up to 1 million base pair context length using the [StripedHyena 2](https://github.com/Zymrael/savanna/blob/main/paper.pdf) architecture. Evo 2 was pretrained using [Savanna](https://github.com/Zymrael/savanna). Evo 2 was trained autoregressively on [OpenGenome2](https://huggingface.co/datasets/arcinstitute/opengenome2), a dataset containing 8.8 trillion tokens from all domains of life.
+Unlike the core framework configurations, this project focuses strictly on validating execution on **NVIDIA Tesla V100-SXM2-32GB** GPUs using a clean **CUDA 12.4 + PyTorch 2.6.0** stack, removing all hardware-specific dependencies (such as FP8-based architectures or multi-GPU interconnect constraints).
 
-We describe Evo 2 in our paper:
-["Genome modeling and design across all domains of life with Evo 2"](https://www.nature.com/articles/s41586-026-10176-5).
+---
 
-> [!NOTE]
-> - **Evo 2 published**: read more in [Nature](https://www.nature.com/articles/s41586-026-10176-5).
-> - **Evo 2 20B released**: 40B-level performance with double the speed, read more [here](https://github.com/ArcInstitute/evo2/releases/tag/v0.5.0).
-> - **Light install for 7B models**: option compatible with more hardware, see [Installation](#installation).
+## Technical Architecture & Scope
 
-## Contents
+This project is tailored specifically for the **Evo2 7B** genomic foundation model. All tooling, benchmarking parameters, scripts, and runtime validation logic are designed for single-GPU execution paths. 
 
-- [Setup](#setup)
-  - [Requirements](#requirements)
-  - [Installation](#installation)
-  - [Docker](#docker)
-- [Usage](#usage)
-  - [Checkpoints](#checkpoints)
-  - [Forward](#forward)
-  - [Embeddings](#embeddings)
-  - [Generation](#generation)
-- [Notebooks](#notebooks)
-- [Nvidia NIM](#nvidia-nim)
-- [Dataset](#dataset)
-- [Training and Finetuning](#training-and-finetuning)
-- [Citation](#citation)
-
-## Setup
-
-This repo is for running Evo 2 locally for inference or generation, using our [Vortex](https://github.com/Zymrael/vortex) inference code. For training and finetuning, see the section [here](#training-and-finetuning).
-You can run Evo 2 without any installation using the [Nvidia Hosted API](https://build.nvidia.com/arc/evo2-40b).
-You can also self-host an instance using Nvidia NIM. See the [Nvidia NIM](#nvidia-nim) section for more 
-information.
-
-### Requirements
-
-Evo 2 is built on the Vortex inference repo, see the [Vortex github](https://github.com/Zymrael/vortex) for more details and Docker option.
-
-**System requirements**
-- [OS] Linux (official) or WSL2 (limited support)
-- [Software]
-	- CUDA: 12.1+ with compatible NVIDIA drivers
-	- cuDNN: 9.3+
-	- Compiler: GCC 9+ or Clang 10+ with C++17 support
-	- Python 3.11 or 3.12
-- Recommended Torch 2.6.x or 2.7.x
-
-**FP8 and Transformer Engine requirements**
-
-The 40B, 20B, and 1B models require FP8 via [Transformer Engine](https://github.com/NVIDIA/TransformerEngine) for numerical accuracy and a Nvidia Hopper GPU. The 7B models can run in bfloat16 without Transformer Engine on any supported GPU.
-
-| Model | FP8 (Transformer Engine) Required |
-|-------|-----------------------------------|
-| `evo2_7b` / `evo2_7b_262k` / `evo2_7b_base`   | No |
-| `evo2_20b` | Yes |
-| `evo2_40b` / `evo2_40b_base` | Yes |
-| `evo2_1b_base` | Yes |
-
-Always validate model outputs after configuration changes or on different hardware by using the tests.
-
-### Installation
-
-**Full install**
-
-Install [Transformer Engine](https://github.com/NVIDIA/TransformerEngine) and [Flash Attention](https://github.com/Dao-AILab/flash-attention/tree/main) first, then install Evo 2. We recommend using conda to install Transformer Engine:
-```bash
-conda install -c nvidia cuda-nvcc cuda-cudart-dev
-conda install -c conda-forge transformer-engine-torch=2.3.0
-pip install flash-attn==2.8.0.post2 --no-build-isolation
-pip install evo2
+```
+                                +---------------------------+
+                                |      HPC Batch Job        |
+                                |      (SLURM Scheduler)    |
+                                +-------------+-------------+
+                                              |
+                                              v
+                                +-------------+-------------+
+                                |  Portable Runtime Host    |
+                                | (PyTorch 2.6.0 + CUDA 12.4)|
+                                +-------------+-------------+
+                                              |
+                                              v
+                              +---------------+---------------+
+                              |    NVIDIA Tesla V100 GPU      |
+                              |  - FP32/FP16 Math Engines     |
+                              |  - Strict Non-FP8 Execution   |
+                              +---------------+---------------+
+                                              |
+                       +----------------------+----------------------+
+                       |                                             |
+                       v                                             v
+        +--------------+--------------+               +--------------+--------------+
+        |   Genomic Sequence Scoring  |               |  Deterministic DNA Gen      |
+        | - Long-Context Performance  |               | - Standalone TXT Pipelines  |
+        | - Sliding-Window Metrics    |               | - Fixed PRNG Seed Validation|
+        +-----------------------------+               +-----------------------------+
 ```
 
-**Light install (7B models only, no Transformer Engine)**
+### Core Architecture Goals
+* **Environment Isolation:** Clean execution parameters for legacy and enterprise HPC systems lacking native FP8 support (e.g., V100/A100 hardware).
+* **Determinism:** Standalone reproducible test pipelines to ensure that sequence generation matches baseline validation runs across heterogeneous cluster nodes.
+* **SLURM Integration:** Out-of-the-box job configurations for batch queue execution, ensuring proper device affinity and memory management limits.
 
-Evo 2 7B models can run without Transformer Engine or FP8-capable hardware. If you run into issues installing Flash Attention, see the [Flash Attention GitHub](https://github.com/Dao-AILab/flash-attention/tree/main) for system requirements and troubleshooting.
+---
 
-```bash
-# A compatible PyTorch must be installed before flash attention, for example: pip install torch==2.7.1 --index-url https://download.pytorch.org/whl/cu128
-pip install flash-attn==2.8.0.post2 --no-build-isolation
-pip install evo2
-```
+## Actual Implemented Workflows
 
-**From source**
+This repository provides specific, operational workflows developed for runtime validation and execution.
+
+### 1. HPC Benchmarking & Profiling
+The primary profiling pipeline resides in `benchmark_runtime.py`. It tracks and records the execution characteristics of Evo2 7B over long context lengths:
+* **Throughput Metrics:** Tracks tokens processed per second across varying batch sizes.
+* **VRAM Allocation Analytics:** Monitors active and cached GPU memory thresholds to prevent Out-Of-Memory (OOM) faults.
+* **Scaling Curves:** Measures latency scaling behavior across different context windows.
+* **SLURM Integration:** Wraps execution under structured resource management (using `run_evo2.sh`).
+
+### 2. Deterministic DNA Generation Testing
+For verification of execution correctness on isolated cluster nodes, `test_dna_generation.py` provides a reproducible testing script that uses fixed seeds to output sequence generations and target mutations.
+* Verifies PRNG state consistency.
+* Generates clear runtime logs to identify server-to-server compute drift.
+* Outputs standalone metrics for post-run analysis.
+
+---
+
+## Runtime Validation & Environment Specs
+
+All components of this repository have been engineered and validated against the following specific execution baseline:
+
+* **Model Variant:** `evo2_7b`
+* **GPU Hardware:** NVIDIA Tesla V100-SXM2-32GB
+* **CUDA Runtime:** 12.4
+* **PyTorch Version:** `2.6.0+cu124`
+* **Python Version:** 3.11
+* **Platform:** Enterprise Linux HPC Cluster
+* **Inference Mode:** Single-GPU FP16 Execution (No FP8/TransformerEngine dependencies required)
+
+---
+
+## Job Execution & HPC Deployment
+
+### Running the Profiling Benchmark (SLURM)
+To submit the benchmarking suite to a SLURM queue, configure your partition constraints inside [run_evo2.sh](file:///d:/evo2-portable-runtime/run_evo2.sh) and execute:
 
 ```bash
-git clone https://github.com/arcinstitute/evo2
-cd evo2
-pip install -e .
+sbatch run_evo2.sh
 ```
 
-**Verify installation**
+The script configures `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` to optimize VRAM allocations on the V100, and triggers:
 
 ```bash
-python -m evo2.test.test_evo2_generation --model_name evo2_7b  # or evo2_1b_base, evo2_20b, evo2_40b
+python benchmark_runtime.py \
+    --batch-sizes 1 2 \
+    --windows 2048 4096 \
+    --num-variants 1000 \
+    --output-dir benchmark_large
 ```
 
-### Docker
-
-Evo 2 can be run using Docker (shown below), Singularity, or Apptainer.
+### Running the DNA Generation Test (SLURM)
+To run a rapid sanity check to verify system determinism and compute scaling on an allocated node:
 
 ```bash
-docker build -t evo2 .
-docker run -it --rm --gpus '"device=0"' -v ./huggingface:/root/.cache/huggingface evo2 bash
+sbatch run_dna_test.sh
 ```
-Note: The volume mount (-v) preserves downloaded models between container runs and specifies where they are saved.
 
-Once inside the container:
+This script executes [test_dna_generation.py](file:///d:/evo2-portable-runtime/test_dna_generation.py), which performs fixed-seed random generation and mutation calculations, tracking execution latency down to millisecond precision.
+
+---
+
+## Singularity / Apptainer Containerization
+
+For HPC environments that restrict Docker runtime execution due to security policies, this project supports building a Singularity image (`.sif`) directly from the provided `Dockerfile`.
+
+### Build Workflow
+Convert the Dockerfile build layers to an Apptainer/Singularity container on a local staging machine or HPC build node:
 
 ```bash
-python -m evo2.test.test_evo2_generation --model_name evo2_7b
+singularity build evo2_7b_portable.sif Dockerfile
 ```
 
-## Usage
+### HPC Execution
+Execute the containerized model within an active SLURM reservation, mounting the host cache directory to avoid repetitive HuggingFace downloads:
 
-### Checkpoints
-
-We provide the following model checkpoints, hosted on [HuggingFace](https://huggingface.co/arcinstitute):
-| Checkpoint Name                        | Description |
-|----------------------------------------|-------------|
-| `evo2_40b`  | 40B parameter model with 1M context |
-| `evo2_20b`  | 20B parameter model with 1M context |
-| `evo2_7b`  | 7B parameter model with 1M context |
-| `evo2_40b_base`  | 40B parameter model with 8K context |
-| `evo2_7b_base`  | 7B parameter model with 8K context |
-| `evo2_1b_base`  | Smaller 1B parameter model with 8K context |
-| `evo2_7b_262k`  | 7B parameter model with 262K context |
-| `evo2_7b_microviridae`  | 7B parameter base model fine-tuned on Microviridae genomes |
-
-**Note:** The 40B model requires multiple H100 GPUs. Vortex automatically handles device placement, splitting the model across available CUDA devices.
-
-### Forward
-
-Evo 2 can be used to score the likelihoods across a DNA sequence.
-
-```python
-import torch
-from evo2 import Evo2
-
-evo2_model = Evo2('evo2_7b')
-
-sequence = 'ACGT'
-input_ids = torch.tensor(
-    evo2_model.tokenizer.tokenize(sequence),
-    dtype=torch.int,
-).unsqueeze(0).to('cuda:0')
-
-outputs, _ = evo2_model(input_ids)
-logits = outputs[0]
-
-print('Logits: ', logits)
-print('Shape (batch, length, vocab): ', logits.shape)
+```bash
+singularity exec --nv \
+    -B /scratch/user/.cache/huggingface:/root/.cache/huggingface \
+    evo2_7b_portable.sif \
+    python benchmark_runtime.py --batch-sizes 1 --windows 2048 --num-variants 100
 ```
 
-### Embeddings
+---
 
-Evo 2 embeddings can be saved for use downstream. We find that intermediate embeddings work better than final embeddings, see our paper for details.
-
-```python
-import torch
-from evo2 import Evo2
-
-evo2_model = Evo2('evo2_7b')
-
-sequence = 'ACGT'
-input_ids = torch.tensor(
-    evo2_model.tokenizer.tokenize(sequence),
-    dtype=torch.int,
-).unsqueeze(0).to('cuda:0')
-
-layer_name = 'blocks.28.mlp.l3'
-
-outputs, embeddings = evo2_model(input_ids, return_embeddings=True, layer_names=[layer_name])
-
-print('Embeddings shape: ', embeddings[layer_name].shape)
-```
-
-### Generation
-
-Evo 2 can generate DNA sequences based on prompts.
-
-```python
-from evo2 import Evo2
-
-evo2_model = Evo2('evo2_7b')
-
-output = evo2_model.generate(prompt_seqs=["ACGT"], n_tokens=400, temperature=1.0, top_k=4)
-
-print(output.sequences[0])
-```
-
-## Notebooks
-
-We provide example notebooks.
-
-The [BRCA1 scoring notebook](https://github.com/ArcInstitute/evo2/blob/main/notebooks/brca1/brca1_zero_shot_vep.ipynb) shows zero-shot *BRCA1* variant effect prediction. This example includes a walkthrough of:
-- Performing zero-shot *BRCA1* variant effect predictions using Evo 2
-- Reference vs alternative allele normalization
-
-The [generation notebook](https://github.com/ArcInstitute/evo2/blob/main/notebooks/generation/generation_notebook.ipynb) shows DNA sequence completion with Evo 2. This example shows:
-- DNA prompt based generation and 'DNA autocompletion'
-- How to get and prompt using phylogenetic species tags for generation
-
-The [exon classifier notebook](https://github.com/ArcInstitute/evo2/blob/main/notebooks/exon_classifier/exon_classifier.ipynb) demonstrates exon classification using Evo 2 embeddings. This example shows:
-- Running the Evo 2 based exon classifier
-- Performance metrics and visualization
-
-The [sparse autoencoder (SAE) notebook](https://github.com/ArcInstitute/evo2/blob/main/notebooks/sparse_autoencoder/sparse_autoencoder.ipynb) explores interpretable features learned by Evo 2. This example includes:
-- Running and visualizing Evo 2 SAE features
-- Demonstrating SAE features on a part of the *E. coli* genome
-
-
-## Nvidia NIM
-
-Evo 2 is available on [Nvidia NIM](https://catalog.ngc.nvidia.com/containers?filters=&orderBy=scoreDESC&query=evo2&page=&pageSize=) and [hosted API](https://build.nvidia.com/arc/evo2-40b).
-
-- [Documentation](https://docs.nvidia.com/nim/bionemo/evo2/latest/overview.html)
-- [Quickstart](https://docs.nvidia.com/nim/bionemo/evo2/latest/quickstart-guide.html)
-
-The quickstart guides users through running Evo 2 on the NVIDIA NIM using a python or shell client after starting NIM. An example python client script is shown below. This is the same way you would interact with the [Nvidia hosted API](https://build.nvidia.com/arc/evo2-40b?snippet_tab=Python).
-
-```python
-#!/usr/bin/env python3
-import requests
-import os
-import json
-from pathlib import Path
-
-key = os.getenv("NVCF_RUN_KEY") or input("Paste the Run Key: ")
-
-r = requests.post(
-    url=os.getenv("URL", "https://health.api.nvidia.com/v1/biology/arc/evo2-40b/generate"),
-    headers={"Authorization": f"Bearer {key}"},
-    json={
-        "sequence": "ACTGACTGACTGACTG",
-        "num_tokens": 8,
-        "top_k": 1,
-        "enable_sampled_probs": True,
-    },
-)
-
-if "application/json" in r.headers.get("Content-Type", ""):
-    print(r, "Saving to output.json:\n", r.text[:200], "...")
-    Path("output.json").write_text(r.text)
-elif "application/zip" in r.headers.get("Content-Type", ""):
-    print(r, "Saving large response to data.zip")
-    Path("data.zip").write_bytes(r.content)
-else:
-    print(r, r.headers, r.content)
-```
-
-
-### Very long sequences
-
-You can use [Savanna](https://github.com/Zymrael/savanna) or [Nvidia BioNemo](https://github.com/NVIDIA/bionemo-framework) for embedding long sequences. Vortex can currently compute over very long sequences via teacher prompting, however please note that forward pass on long sequences may currently be slow.
-
-## Dataset
-
-The OpenGenome2 dataset used for pretraining Evo2 is available on [HuggingFace ](https://huggingface.co/datasets/arcinstitute/opengenome2). Data is available either as raw fastas or as JSONL files which include preprocessing and data augmentation.
-
-## Training and Finetuning
-
-Evo 2 was trained using [Savanna](https://github.com/Zymrael/savanna), an open source framework for training alternative architectures.
-
-To train or finetune Evo 2, you can use [Savanna](https://github.com/Zymrael/savanna) or [Nvidia BioNemo](https://github.com/NVIDIA/bionemo-framework) which provides a [Evo 2 finetuning tutorial here](https://github.com/NVIDIA/bionemo-framework/blob/ca16c2acf9bf813d020b6d1e2d4e1240cfef6a69/docs/docs/user-guide/examples/bionemo-evo2/fine-tuning-tutorial.ipynb).
-
-## Citation
-
-If you find these models useful for your research, please cite the relevant papers
+## Repository Structure
 
 ```
-@article{Brixi2026,
-    author  = {Brixi, Garyk and Durrant, Matthew G. and Ku, Jerome and Naghipourfar, Mohsen and Poli, Michael and Sun, Gwanggyu and Brockman, Greg and Chang, Daniel and Fanton, Alison and Gonzalez, Gabriel A. and King, Samuel H. and Li, David B. and Merchant, Aditi T. and Nguyen, Eric and Ricci-Tam, Chiara and Romero, David W. and Schmok, Jonathan C. and Taghibakhshi, Ali and Vorontsov, Anton and Yang, Brandon and Deng, Myra and Gorton, Liv and Nguyen, Nam and Wang, Nicholas K. and Pearce, Michael T. and Simon, Elana and Adams, Etowah and Amador, Zachary J. and Ashley, Euan A. and Baccus, Stephen A. and Dai, Haoyu and Dillmann, Steven and Ermon, Stefano and Guo, Daniel and Herschl, Michael H. and Ilango, Rajesh and Janik, Ken and Lu, Amy X. and Mehta, Reshma and Mofrad, Mohammad R. K. and Ng, Madelena Y. and Pannu, Jaspreet and Ré, Christopher and St. John, John and Sullivan, Jeremy and Tey, Joseph and Viggiano, Ben and Zhu, Kevin and Zynda, Greg and Balsam, Daniel and Collison, Patrick and Costa, Anthony B. and Hernandez-Boussard, Tina and Ho, Eric and Liu, Ming-Yu and McGrath, Thomas and Powell, Kimberly and Pinglay, Sudarshan and Burke, Dave P. and Goodarzi, Hani and Hsu, Patrick D. and Hie, Brian L.},
-    title   = {Genome modelling and design across all domains of life with Evo 2},
-    journal = {Nature},
-    year    = {2026},
-    doi     = {10.1038/s41586-026-10176-5},
-    url     = {https://doi.org/10.1038/s41586-026-10176-5},
-}
+├── .gitignore                   # Excludes large benchmark outputs, pycache, and logs
+├── pyproject.toml               # Package specifications and dependency settings
+├── benchmark_runtime.py         # Main profiling script tracking latency, throughput, and VRAM
+├── test_dna_generation.py       # Deterministic DNA sequence generation validator
+├── run_evo2.sh                  # SLURM script for full-scale long-context benchmarking
+├── run_dna_test.sh              # SLURM script for deterministic sanity test execution
+├── Dockerfile                   # Deployment container blueprint
+├── evo/                         # Evo2 model configuration wrappers and hooks
+│   ├── models.py                # Checkpoint loading and model orchestration
+│   └── scoring.py               # Inference pipelines and scoring metrics
+└── vortex/                      # Nested compilation hooks and adaptive fallbacks
 ```
 
+---
+
+## Attribution & Project Separation
+
+This repository is an independent runtime engineering and benchmarking project. It is **not** an official distribution of the ARC Institute. 
+
+* **Evo2 Core Architecture:** All intellectual property relating to the model architecture, pretrained parameters, and foundational weights belong to the original authors at the ARC Institute (see the paper *Genome modelling and design across all domains of life with Evo 2*).
+* **Portable Runtime Modifications:** Custom benchmarking scripts (`benchmark_runtime.py`, `test_dna_generation.py`), batch execution workflows (`run_evo2.sh`, `run_dna_test.sh`), and environment-specific dependency alignments are independent contributions engineered to enable stable, long-context evaluation on enterprise V100 GPU nodes.
