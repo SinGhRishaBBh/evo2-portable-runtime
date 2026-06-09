@@ -29,3 +29,35 @@ benchmark_test/
 
 # Misc
 .DS_Store
+
+# Container artifacts
+
+evo2-runtime/
+*.sif
+
+# Runtime binaries
+
+python
+
+# Logs
+
+*.log
+
+# Cache
+
+**pycache**/
+
+# Debug / runtime traces
+
+activations_debug.log
+trace_*.json
+
+# Benchmark outputs
+
+benchmark_test_results/
+
+# Python cache
+
+**pycache**/
+*.py[cod]
+

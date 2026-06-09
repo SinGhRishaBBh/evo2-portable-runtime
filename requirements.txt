@@ -1,0 +1,16 @@
+torch>=2.5.1
+transformers
+huggingface_hub
+einops
+biopython
+sentencepiece
+safetensors
+tqdm
+flash-attn==2.7.0.post2
+numpy
+scipy
+pandas
+matplotlib
+seaborn
+psutil
+
