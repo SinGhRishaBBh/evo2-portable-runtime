@@ -47,3 +47,17 @@ python
 
 **pycache**/
 
+# Debug / runtime traces
+
+activations_debug.log
+trace_*.json
+
+# Benchmark outputs
+
+benchmark_test_results/
+
+# Python cache
+
+**pycache**/
+*.py[cod]
+
