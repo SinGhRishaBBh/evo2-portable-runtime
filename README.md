@@ -1,136 +1,165 @@
-# Evo2 7B Portable Runtime & HPC Benchmarking Infrastructure
+# Evo2 7B — Portable Runtime & HPC Benchmarking Infrastructure
 
-This repository contains custom engineering, validation, and benchmarking assets designed to establish a stable, production-grade, portable runtime environment specifically for **Evo2 7B** execution on single-GPU HPC systems. 
+This repository contains the engineering, validation, and benchmarking assets required to run **Evo2 7B** reliably on single-GPU HPC systems beyond the model's original Ampere-native target. The primary goal is a stable, production-grade portable runtime validated on **NVIDIA Tesla V100-SXM2-32GB** hardware using a **CUDA 12.4 + PyTorch 2.6.0** stack, with all FP8 and multi-GPU interconnect dependencies removed.
 
-Unlike the core framework configurations, this project focuses strictly on validating execution on **NVIDIA Tesla V100-SXM2-32GB** GPUs using a clean **CUDA 12.4 + PyTorch 2.6.0** stack, removing all hardware-specific dependencies (such as FP8-based architectures or multi-GPU interconnect constraints).
+> **This is not an official ARC Institute distribution.** See [Attribution](#attribution--project-separation) for details.
 
 ---
 
-## Technical Architecture & Scope
+## Table of Contents
 
-This project is tailored specifically for the **Evo2 7B** genomic foundation model. All tooling, benchmarking parameters, scripts, and runtime validation logic are designed for single-GPU execution paths. 
+1. [Architecture Overview](#architecture-overview)
+2. [Cross-GPU Portability: What Changed](#cross-gpu-portability-what-changed)
+3. [Validated Performance Benchmarks](#validated-performance-benchmarks-evo2-7b-on-v100)
+4. [Deterministic DNA Mutation Validation](#deterministic-dna-mutation-validation)
+5. [Implemented Workflows](#implemented-workflows)
+6. [Validated Runtime Environment](#validated-runtime-environment)
+7. [Job Execution & HPC Deployment](#job-execution--hpc-deployment)
+8. [Infrastructure Roadmap](#infrastructure-roadmap)
+9. [Repository Structure](#repository-structure)
+10. [Attribution & Project Separation](#attribution--project-separation)
+
+---
+
+## Architecture Overview
 
 ```
-                                +---------------------------+
-                                |      HPC Batch Job        |
-                                |      (SLURM Scheduler)    |
-                                +-------------+-------------+
-                                              |
-                                              v
-                                +-------------+-------------+
-                                |  Portable Runtime Host    |
-                                | (PyTorch 2.6.0 + CUDA 12.4)|
-                                +-------------+-------------+
-                                              |
-                                              v
-                              +---------------+---------------+
-                              |    NVIDIA Tesla V100 GPU      |
-                              |  - FP32/FP16 Math Engines     |
-                              |  - Strict Non-FP8 Execution   |
-                              +---------------+---------------+
-                                              |
-                       +----------------------+----------------------+
-                       |                                             |
-                       v                                             v
-        +--------------+--------------+               +--------------+--------------+
-        |   Genomic Sequence Scoring  |               |  Deterministic DNA Gen      |
-        | - Long-Context Performance  |               | - Standalone TXT Pipelines  |
-        | - Sliding-Window Metrics    |               | - Fixed PRNG Seed Validation|
-        +-----------------------------+               +-----------------------------+
+                        ┌──────────────────────────────┐
+                        │        HPC Batch Job          │
+                        │      (SLURM Scheduler)        │
+                        └──────────────┬───────────────┘
+                                       │
+                                       ▼
+                        ┌──────────────────────────────┐
+                        │     Portable Runtime Host     │
+                        │  PyTorch 2.6.0 + CUDA 12.4   │
+                        └──────────────┬───────────────┘
+                                       │
+                                       ▼
+                        ┌──────────────────────────────┐
+                        │    NVIDIA Tesla V100 GPU      │
+                        │  FP32/FP16 — No FP8/TE dep.  │
+                        └───────────┬──────────────────┘
+                                    │
+              ┌─────────────────────┴─────────────────────┐
+              ▼                                             ▼
+┌─────────────────────────────┐         ┌──────────────────────────────┐
+│  Genomic Sequence Scoring   │         │  Deterministic DNA Gen       │
+│  · Long-context performance │         │  · Fixed-seed PRNG pipelines │
+│  · Sliding-window metrics   │         │  · Cross-node drift detection│
+└─────────────────────────────┘         └──────────────────────────────┘
 ```
 
-### Core Architecture Goals
-* **Environment Isolation:** Clean execution parameters for legacy and enterprise HPC systems lacking native FP8 support (e.g., V100/A100 hardware).
-* **Determinism:** Standalone reproducible test pipelines to ensure that sequence generation matches baseline validation runs across heterogeneous cluster nodes.
-* **SLURM Integration:** Out-of-the-box job configurations for batch queue execution, ensuring proper device affinity and memory management limits.
+### Design Goals
+
+| Goal | Implementation |
+|---|---|
+| **Environment isolation** | Removes FlashAttention, FP8, and TransformerEngine; targets legacy/enterprise V100 nodes |
+| **Determinism** | Fixed-seed generation pipeline validates output consistency across heterogeneous cluster nodes |
+| **SLURM integration** | Ready-to-submit job scripts with correct device affinity and memory management configuration |
+
+---
+
+## Cross-GPU Portability: What Changed
+
+The original Evo2 7B model targets Ampere-class GPUs (A100/H100) and depends on BF16 precision and FlashAttention kernels unavailable on V100. Two source-level changes make the model portable:
+
+| Component | Original | Edited (Portable) |
+|---|---|---|
+| **Precision** | BF16 | FP16 |
+| **Attention backend** | FlashAttention (Ampere-native) | PyTorch SDPA fallback |
+| **FP8 / TransformerEngine** | Required | Removed |
+
+These changes enable execution on any CUDA 12.x–capable GPU without hardware-specific kernel dependencies, at the cost of throughput (see benchmarks below).
 
 ---
 
 ## Validated Performance Benchmarks (Evo2 7B on V100)
 
-A comprehensive comparison was performed comparing the **Original Evo2 7B** model against the custom **Edited Evo2 7B Cross-GPU** model on target V100 architectures.
+A full comparative benchmark was conducted between the **Original Evo2 7B** (BF16 + FlashAttention) and the **Edited Cross-GPU** model (FP16 + SDPA) on V100 hardware.
 
-### 1. Throughput & Latency Profile
-The runtime changes (converting precision to **FP16** and utilizing a **PyTorch SDPA fallback** path instead of Ampere-optimized **FlashAttention**) impacts throughput metrics due to un-fused memory operations:
+### Throughput & Latency
 
-* **Original Model (BF16, FlashAttention):**
-  * Throughput: ~9–11 variants/sec (~10k–11k tokens/sec)
-  * Average Latency: ~100 ms (extremely low variance)
-* **Edited Model (FP16, SDPA Fallback):**
-  * Throughput: ~0.69–0.77 variants/sec (~700–800 tokens/sec)
-  * Average Latency: ~1.40 sec (operationally stable, no outlier spikes)
-  * Performance Delta: **13–15× throughput slowdown** due to SDPA kernel memory footprints on V100 architectures.
+| Metric | Original (BF16 + FlashAttention) | Edited (FP16 + SDPA) |
+|---|---|---|
+| Throughput | ~9–11 variants/sec (~10–11k tokens/sec) | ~0.69–0.77 variants/sec (~700–800 tokens/sec) |
+| Average latency | ~100 ms (very low variance) | ~1.40 sec (stable, no outlier spikes) |
+| **Performance delta** | — | **13–15× throughput reduction** |
 
-### 2. VRAM & Resource Utilisation
-* **VRAM Footprint:** VRAM usage remains identical between models (~12.56 GB allocated, ~13.04 GB reserved). The shift to FP16 does **NOT** reduce VRAM footprint relative to BF16.
-* **Fragmentation:** Normal PyTorch memory allocator overhead (~480 MB fragmentation) was verified, with no memory leaks or GPU starvation observed.
-* **Pipeline Overheads:** Inference execution dominates total pipeline cost (>99% of runtime). Preprocessing (FASTA fetch, tokenization) and I/O (CSV writing) are operationally negligible.
+The slowdown is attributable to SDPA's un-fused memory operations on V100 architectures. Latency remains operationally stable with no spikes or OOM events.
 
----
+### VRAM & Resource Utilisation
 
-## Deterministic DNA Mutation Consistency
-
-Validation tests using the deterministic sequence generation framework confirmed zero functional or output changes between the original model and the edited cross-GPU model:
-
-* **Reference Synthesis:** Both models generated an identical 1,000 bp reference sequence (GC content stable at **49.30%**).
-* **Deterministic Mutagenesis:** Using fixed seeding (`random.seed(42)`), both versions applied the exact same 5 point substitution mutations.
-* **Composition:** All 5 substitutions are transversions (purine ↔ pyrimidine swaps), preserving target coordinates:
-
-| Position | Mutation | Type | Swap Category |
-| :--- | :--- | :--- | :--- |
-| **52** | G → C | Substitution | Transversion (Purine ↔ Pyrimidine) |
-| **94** | A → T | Substitution | Transversion (Purine ↔ Pyrimidine) |
-| **218** | G → T | Substitution | Transversion (Purine ↔ Pyrimidine) |
-| **655** | A → T | Substitution | Transversion (Purine ↔ Pyrimidine) |
-| **995** | A → C | Substitution | Transversion (Purine ↔ Pyrimidine) |
-
-The sequence consistency across deployments confirms deterministic mutation execution under a fixed RNG seed configuration without altering biological outputs.
+- **VRAM footprint:** Identical across both models — ~12.56 GB allocated, ~13.04 GB reserved. The FP16 conversion does **not** reduce VRAM usage relative to BF16.
+- **Memory fragmentation:** ~480 MB allocator overhead (normal PyTorch behaviour). No memory leaks or GPU starvation observed.
+- **Pipeline cost distribution:** Inference dominates total runtime (>99%). FASTA fetch, tokenisation, and CSV I/O are operationally negligible.
 
 ---
 
-## Actual Implemented Workflows
+## Deterministic DNA Mutation Validation
 
-This repository provides specific, operational workflows developed for runtime validation and execution.
+Validation tests confirm zero functional divergence between the original and edited models under a fixed RNG seed.
 
-### 1. HPC Benchmarking & Profiling
-The primary profiling pipeline resides in `benchmark_runtime.py`. It tracks and records the execution characteristics of Evo2 7B over long context lengths:
-* **Throughput Metrics:** Tracks tokens processed per second across varying batch sizes.
-* **VRAM Allocation Analytics:** Monitors active and cached GPU memory thresholds to prevent Out-Of-Memory (OOM) faults.
-* **Scaling Curves:** Measures latency scaling behavior across different context windows.
-* **SLURM Integration:** Wraps execution under structured resource management (using `run_evo2.sh`).
+- **Reference sequence:** Both models produced an identical 1,000 bp reference (GC content: **49.30%**).
+- **Mutagenesis:** Using `random.seed(42)`, both applied the exact same 5 point substitutions.
+- **Mutation profile:** All 5 substitutions are transversions (purine ↔ pyrimidine), confirming no stochastic drift between deployments.
 
-### 2. Deterministic DNA Generation Testing
-For verification of execution correctness on isolated cluster nodes, `test_dna_generation.py` provides a reproducible testing script that uses fixed seeds to output sequence generations and target mutations.
-* Verifies PRNG state consistency.
-* Generates clear runtime logs to identify server-to-server compute drift.
-* Outputs standalone metrics for post-run analysis.
+| Position | Mutation | Type |
+|---|---|---|
+| 52 | G → C | Transversion |
+| 94 | A → T | Transversion |
+| 218 | G → T | Transversion |
+| 655 | A → T | Transversion |
+| 995 | A → C | Transversion |
 
 ---
 
-## Runtime Validation & Environment Specs
+## Implemented Workflows
 
-All components of this repository have been engineered and validated against the following specific execution baseline:
+### 1. HPC Benchmarking & Profiling (`benchmark_runtime.py`)
 
-* **Model Variant:** `evo2_7b`
-* **GPU Hardware:** NVIDIA Tesla V100-SXM2-32GB
-* **CUDA Runtime:** 12.4
-* **PyTorch Version:** `2.6.0+cu124`
-* **Python Version:** 3.11
-* **Platform:** Enterprise Linux HPC Cluster
-* **Inference Mode:** Single-GPU FP16 Execution (No FP8/TransformerEngine dependencies required)
+The primary profiling pipeline tracks Evo2 7B execution across long context lengths:
+
+- **Throughput metrics:** Tokens per second across varying batch sizes
+- **VRAM analytics:** Active and cached GPU memory monitoring (OOM prevention)
+- **Scaling curves:** Latency as a function of context window length
+- **SLURM integration:** Wrapped via `run_evo2.sh` for queue submission
+
+### 2. Deterministic DNA Generation Testing (`test_dna_generation.py`)
+
+A reproducible correctness harness for verifying execution on isolated cluster nodes:
+
+- Validates PRNG state consistency across machines
+- Generates timestamped runtime logs to detect server-to-server compute drift
+- Outputs standalone metrics for post-run analysis
+
+---
+
+## Validated Runtime Environment
+
+| Component | Specification |
+|---|---|
+| Model | `evo2_7b` |
+| GPU | NVIDIA Tesla V100-SXM2-32GB |
+| CUDA runtime | 12.4 |
+| PyTorch | `2.6.0+cu124` |
+| Python | 3.11 |
+| Platform | Enterprise Linux HPC Cluster (SLURM) |
+| Inference mode | Single-GPU FP16 (no FP8 / TransformerEngine required) |
 
 ---
 
 ## Job Execution & HPC Deployment
 
-### Running the Profiling Benchmark (SLURM)
-To submit the benchmarking suite to a SLURM queue, configure your partition constraints inside [run_evo2.sh](file:///d:/evo2-portable-runtime/run_evo2.sh) and execute:
+### Profiling Benchmark (SLURM)
+
+Configure partition constraints in `run_evo2.sh`, then submit:
 
 ```bash
 sbatch run_evo2.sh
 ```
 
-The script configures `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` to optimize VRAM allocations on the V100, and triggers:
+The script sets `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` to optimise VRAM allocation on V100, and runs:
 
 ```bash
 python benchmark_runtime.py \
@@ -140,65 +169,68 @@ python benchmark_runtime.py \
     --output-dir benchmark_large
 ```
 
-### Running the DNA Generation Test (SLURM)
-To run a rapid sanity check to verify system determinism and compute scaling on an allocated node:
+### Deterministic Sanity Test (SLURM)
 
 ```bash
 sbatch run_dna_test.sh
 ```
 
-This script executes [test_dna_generation.py](file:///d:/evo2-portable-runtime/test_dna_generation.py), which performs fixed-seed random generation and mutation calculations, tracking execution latency down to millisecond precision.
+Executes `test_dna_generation.py` with fixed-seed random generation and mutation calculations, tracking latency to millisecond precision.
 
 ---
 
-## Infrastructure Roadmap & Future Containerization
+## Infrastructure Roadmap
 
-### Planned Singularity / Apptainer Containerization
-Containerized Singularity-based deployment was planned as part of the future infrastructure optimization roadmap; however, benchmarking and validation for this environment were not completed during the current evaluation cycle. Current benchmarking results are limited to the actively validated bare-metal runtime environments. Singularity-based deployment and HPC container benchmarking remain outside the scope of the present assessment.
+### Singularity / Apptainer Containerisation (Planned)
 
-Future plans to build and validate the runtime environment within Singularity include:
-* **Target Build Workflow (Planned):**
-  ```bash
-  # Future work: Convert the Dockerfile build layers to an Apptainer/Singularity container
-  singularity build evo2_7b_portable.sif Dockerfile
-  ```
-* **Target HPC Execution (Planned):**
-  ```bash
-  # Future work: Execute within a containerized SLURM reservation
-  singularity exec --nv \
-      -B /scratch/user/.cache/huggingface:/root/.cache/huggingface \
-      evo2_7b_portable.sif \
-      python benchmark_runtime.py --batch-sizes 1 --windows 2048 --num-variants 100
-  ```
+Singularity-based deployment is on the roadmap but was not completed during the current evaluation cycle. All benchmarks reflect bare-metal runtime results only.
 
-### Future Optimization Roadmap (Planned Enhancements)
-* **`torch.compile()` Integration:** Compile the SDPA attention blocks via PyTorch's Inductor backend to recover lost execution performance.
-* **INT8 Quantization:** Implement and test low-bit model quantization to reduce memory overhead during long-context execution sweeps.
-* **Triton Attention Backend:** Develop adaptive fallback attention kernels written in Triton to bridge the speed gap on V100/non-Ampere hardware.
+Planned build and execution workflows:
+
+```bash
+# Convert Dockerfile to Apptainer/Singularity container
+singularity build evo2_7b_portable.sif Dockerfile
+
+# Execute within a containerised SLURM reservation
+singularity exec --nv \
+    -B /scratch/user/.cache/huggingface:/root/.cache/huggingface \
+    evo2_7b_portable.sif \
+    python benchmark_runtime.py --batch-sizes 1 --windows 2048 --num-variants 100
+```
+
+### Performance Optimisation (Planned)
+
+| Enhancement | Description |
+|---|---|
+| `torch.compile()` | Compile SDPA attention blocks via PyTorch's Inductor backend to recover throughput |
+| INT8 quantisation | Reduce memory overhead during long-context sweeps |
+| Triton attention backend | Adaptive fallback attention kernels to bridge the V100 performance gap |
 
 ---
 
 ## Repository Structure
 
 ```
-├── .gitignore                   # Excludes large benchmark outputs, pycache, and logs
-├── pyproject.toml               # Package specifications and dependency settings
-├── benchmark_runtime.py         # Main profiling script tracking latency, throughput, and VRAM
-├── test_dna_generation.py       # Deterministic DNA sequence generation validator
-├── run_evo2.sh                  # SLURM script for full-scale long-context benchmarking
-├── run_dna_test.sh              # SLURM script for deterministic sanity test execution
-├── Dockerfile                   # Deployment container blueprint
-├── evo/                         # Evo2 model configuration wrappers and hooks
+evo2-portable-runtime/
+├── .gitignore                   # Excludes benchmark outputs, pycache, logs
+├── pyproject.toml               # Package specs and dependency configuration
+├── Dockerfile                   # Container deployment blueprint
+├── benchmark_runtime.py         # Profiling script: latency, throughput, VRAM
+├── test_dna_generation.py       # Deterministic DNA generation & mutation validator
+├── run_evo2.sh                  # SLURM job: full-scale long-context benchmarking
+├── run_dna_test.sh              # SLURM job: deterministic sanity check
+├── evo/
 │   ├── models.py                # Checkpoint loading and model orchestration
 │   └── scoring.py               # Inference pipelines and scoring metrics
-└── vortex/                      # Nested compilation hooks and adaptive fallbacks
+└── vortex/                      # Compilation hooks and adaptive attention fallbacks
 ```
 
 ---
 
 ## Attribution & Project Separation
 
-This repository is an independent runtime engineering and benchmarking project. It is **not** an official distribution of the ARC Institute. 
+This repository is an **independent runtime engineering project** and is not affiliated with or endorsed by the ARC Institute.
 
-* **Evo2 Core Architecture:** All intellectual property relating to the model architecture, pretrained parameters, and foundational weights belong to the original authors at the ARC Institute (see the paper *Genome modelling and design across all domains of life with Evo 2*).
-* **Portable Runtime Modifications:** Custom benchmarking scripts (`benchmark_runtime.py`, `test_dna_generation.py`), batch execution workflows (`run_evo2.sh`, `run_dna_test.sh`), and environment-specific dependency alignments are independent contributions engineered to enable stable, long-context evaluation on enterprise V100 GPU nodes.
+**Evo2 Core Architecture:** Model architecture, pretrained weights, and foundational parameters are the intellectual property of the original authors at the ARC Institute. Reference: *Genome modelling and design across all domains of life with Evo 2*.
+
+**Portable Runtime Contributions:** All benchmarking scripts (`benchmark_runtime.py`, `test_dna_generation.py`), batch execution workflows (`run_evo2.sh`, `run_dna_test.sh`), and environment-specific dependency modifications are independent engineering contributions developed to enable stable, long-context evaluation on enterprise V100 hardware.
